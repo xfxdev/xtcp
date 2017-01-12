@@ -34,7 +34,6 @@ type Conn struct {
 	Protocol     Protocol
 	RawConn      net.Conn
 	UserData     interface{}
-	sendBuf      chan []byte
 	sendPackages chan Package
 	close        chan struct{}
 	state        int32
@@ -49,7 +48,6 @@ func NewConn(h Handler, p Protocol, sendBufLen uint) (*Conn, error) {
 	return &Conn{
 		Handler:      h,
 		Protocol:     p,
-		sendBuf:      make(chan []byte, sendBufLen),
 		sendPackages: make(chan Package, sendBufLen),
 		close:        make(chan struct{}),
 	}, nil
@@ -149,6 +147,37 @@ func (c *Conn) recv() {
 	}
 }
 
+func (c *Conn) sendBuf(buf []byte) error {
+	sended := 0
+	var tempDelay time.Duration
+	for sended < len(buf) {
+		wn, err := c.RawConn.Write(buf[sended:])
+		if err != nil {
+			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
+				if tempDelay == 0 {
+					tempDelay = 5 * time.Millisecond
+				} else {
+					tempDelay *= 2
+				}
+				if max := 1 * time.Second; tempDelay > max {
+					tempDelay = max
+				}
+				xlog.Errorf("Conn Send error: %v; retrying in %v", err, tempDelay)
+				time.Sleep(tempDelay)
+			}
+
+			if !c.IsStoped() {
+				xlog.Error("Conn Send error: ", err)
+				c.Stop(StopImmediately)
+			}
+			return err
+		}
+		tempDelay = 0
+		sended += wn
+	}
+	return nil
+}
+
 func (c *Conn) send() {
 	defer c.wg.Done()
 	defer xlog.Debugf("send exit: %v", c.RawConn.RemoteAddr().String())
@@ -163,8 +192,8 @@ func (c *Conn) send() {
 			if c.IsStoped() {
 				return
 			}
-			sendBuf := p.GetCachedPackBuf()
-			if sendBuf == nil {
+			buf := p.GetCachedPackBuf()
+			if buf == nil {
 				sendCachedBuf.Reset()
 				_, err := c.Protocol.PackTo(p, sendCachedBuf)
 				if err == nil {
@@ -172,38 +201,14 @@ func (c *Conn) send() {
 					continue
 				}
 			}
-			sendBuf = sendCachedBuf.Bytes()
-			sended := 0
-			var tempDelay time.Duration
-			for sended < len(sendBuf) {
-				wn, err := c.RawConn.Write(sendBuf[sended:])
-				if err != nil {
-					if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
-						if tempDelay == 0 {
-							tempDelay = 5 * time.Millisecond
-						} else {
-							tempDelay *= 2
-						}
-						if max := 1 * time.Second; tempDelay > max {
-							tempDelay = max
-						}
-						xlog.Errorf("Conn Send error: %v; retrying in %v", err, tempDelay)
-						time.Sleep(tempDelay)
-					}
-
-					if !c.IsStoped() {
-						xlog.Error("Conn Send error: ", err)
-						c.Stop(StopImmediately)
-					}
-					return
-				}
-				tempDelay = 0
-				sended += wn
+			buf = sendCachedBuf.Bytes()
+			if c.sendBuf(buf) != nil {
+				return
 			}
 		case <-c.close:
 			if atomic.LoadInt32(&c.state) != 1 {
 				return
-			} else if len(c.sendBuf) == 0 {
+			} else if len(c.sendPackages) == 0 {
 				// stop when state is closing and send buf list is empty.
 				atomic.StoreInt32(&c.state, 2)
 				c.RawConn.Close()
