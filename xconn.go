@@ -1,7 +1,6 @@
 package xtcp
 
 import (
-	"bytes"
 	"errors"
 	"github.com/xfxdev/xlog"
 	"io"
@@ -30,8 +29,7 @@ const (
 
 // A Conn represents the server side of an tcp connection.
 type Conn struct {
-	Handler      Handler
-	Protocol     Protocol
+	Opts         *Options
 	RawConn      net.Conn
 	UserData     interface{}
 	sendPackages chan Package
@@ -41,16 +39,16 @@ type Conn struct {
 }
 
 // NewConn return new conn.
-func NewConn(h Handler, p Protocol, sendBufLen uint) (*Conn, error) {
-	if sendBufLen == 0 {
-		sendBufLen = DefaultSendBufLength
-	}
+func NewConn(opts *Options) (*Conn, error) {
 	return &Conn{
-		Handler:      h,
-		Protocol:     p,
-		sendPackages: make(chan Package, sendBufLen),
+		Opts:         opts,
+		sendPackages: make(chan Package, opts.SendListLen),
 		close:        make(chan struct{}),
 	}, nil
+}
+
+func (c *Conn) String() string {
+	return c.RawConn.LocalAddr().String() + " -> " + c.RawConn.RemoteAddr().String()
 }
 
 // Stop stops the conn.
@@ -79,25 +77,31 @@ func (c *Conn) IsStoped() bool {
 }
 
 func (c *Conn) serve() {
-	c.Handler.OnConnected(c)
 
 	go c.recv()
 	c.send()
 
-	c.Handler.OnClosed(c)
+	c.Opts.Handler(EventClosed, c, nil)
 }
 
 func (c *Conn) recv() {
 	defer c.wg.Done()
-	defer xlog.Debugf("recv exit: %v", c.RawConn.RemoteAddr().String())
 
 	c.wg.Add(1)
+	recvBuf := newBuffer(c.Opts.RecvBufInitSize, c.Opts.RecvBufMaxSize)
+	if recvBuf == nil {
+		xlog.Error("Conn Recv error: cann't create recv buf")
+		return
+	}
 
 	var tempDelay time.Duration
-	buf := make([]byte, 0, 1024)
-	var bufTmp [1024]byte
 	for {
-		n, err := c.RawConn.Read(bufTmp[:])
+		err := recvBuf.grow(256)
+		if err != nil {
+			xlog.Error("Conn Recv error: ", err)
+			return
+		}
+		_, err = recvBuf.tryRead(c.RawConn)
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 				if tempDelay == 0 {
@@ -110,6 +114,7 @@ func (c *Conn) recv() {
 				}
 				xlog.Errorf("Conn Recv error: %v; retrying in %v", err, tempDelay)
 				time.Sleep(tempDelay)
+				continue
 			}
 
 			if !c.IsStoped() {
@@ -124,22 +129,25 @@ func (c *Conn) recv() {
 
 		tempDelay = 0
 
-		buf = append(buf, bufTmp[:n]...)
-
 		for {
-			p, pl, err := c.Protocol.Unpack(buf)
+			if recvBuf.unreadLen() == 0 {
+				// no buf can unpack.
+				break
+			}
+			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.unreadBytes())
 			if err != nil {
 				xlog.Error("Protocol unpack error: ", err)
 			}
 
 			if pl > 0 {
-				copy(buf[:], buf[pl:])
-				buf = buf[:len(buf)-pl]
+				_, err = recvBuf.advance(pl)
+				if err != nil {
+					xlog.Error("Protocol unpack error: ", err)
+				}
 			}
 
 			if p != nil {
-				p.Conn(c)
-				c.Handler.OnRecv(p)
+				c.Opts.Handler(EventSend, c, p)
 			} else {
 				break
 			}
@@ -164,6 +172,7 @@ func (c *Conn) sendBuf(buf []byte) error {
 				}
 				xlog.Errorf("Conn Send error: %v; retrying in %v", err, tempDelay)
 				time.Sleep(tempDelay)
+				continue
 			}
 
 			if !c.IsStoped() {
@@ -180,11 +189,10 @@ func (c *Conn) sendBuf(buf []byte) error {
 
 func (c *Conn) send() {
 	defer c.wg.Done()
-	defer xlog.Debugf("send exit: %v", c.RawConn.RemoteAddr().String())
 
 	c.wg.Add(1)
 
-	sendCachedBuf := bytes.NewBuffer(nil)
+	sendBuf := newBuffer(256, 2048)
 
 	for {
 		select {
@@ -192,19 +200,21 @@ func (c *Conn) send() {
 			if c.IsStoped() {
 				return
 			}
-			buf := p.GetCachedPackBuf()
-			if buf == nil {
-				sendCachedBuf.Reset()
-				_, err := c.Protocol.PackTo(p, sendCachedBuf)
-				if err == nil {
-					xlog.Error("Protocol pack error: ", err)
-					continue
-				}
+			_, err := c.Opts.Protocol.PackTo(p, sendBuf)
+			if err != nil {
+				xlog.Error("Protocol pack error: ", err)
+				continue
 			}
-			buf = sendCachedBuf.Bytes()
+			buf, err := sendBuf.advance(sendBuf.unreadLen())
+			if err != nil {
+				xlog.Error("Conn Recv error: ", err)
+				continue
+			}
 			if c.sendBuf(buf) != nil {
 				return
 			}
+
+			c.Opts.Handler(EventSend, c, p)
 		case <-c.close:
 			if atomic.LoadInt32(&c.state) != 1 {
 				return
@@ -235,6 +245,8 @@ func (c *Conn) DialAndServe(addr string) error {
 	}
 
 	c.RawConn = rawConn
+
+	c.Opts.Handler(EventConnected, c, nil)
 
 	c.serve()
 

@@ -7,29 +7,9 @@ import (
 	"time"
 )
 
-var (
-	// DefaultSendBufLength is the default length of send buf per connection.
-	DefaultSendBufLength uint = 128
-)
-
-// Handler is the interface of tcp server callback.
-type Handler interface {
-	OnConnected(c *Conn)
-	OnRecv(p Package)
-	OnClosed(c *Conn)
-}
-
-// ServerOpts if the options of server.
-type ServerOpts struct {
-	LisAddr    string
-	Handler    Handler
-	Protocol   Protocol
-	SendBufLen uint // default is DefaultSendBufLength.
-}
-
 // Server used for running a tcp server.
 type Server struct {
-	Opts  *ServerOpts
+	Opts  *Options
 	stop  chan struct{}
 	wg    sync.WaitGroup
 	mu    sync.Mutex
@@ -38,7 +18,7 @@ type Server struct {
 }
 
 // Serve start the tcp server to accept.
-func (s *Server) Serve() {
+func (s *Server) Serve(lisAddr string) {
 	defer func() {
 		s.wg.Done()
 
@@ -54,9 +34,9 @@ func (s *Server) Serve() {
 
 	s.wg.Add(1)
 
-	l, err := net.Listen("tcp", s.Opts.LisAddr)
+	l, err := net.Listen("tcp", lisAddr)
 	if err != nil {
-		xlog.Fatalf("XTCP server: listen error: %v, addr: %v", err, s.Opts.LisAddr)
+		xlog.Fatalf("XTCP server: listen error: %v, addr: %v", err, lisAddr)
 		return
 	}
 
@@ -150,7 +130,7 @@ func (s *Server) handleRawConn(conn net.Conn) {
 	}
 	s.mu.Unlock()
 
-	tcpConn, err := NewConn(s.Opts.Handler, s.Opts.Protocol, s.Opts.SendBufLen)
+	tcpConn, err := NewConn(s.Opts)
 	if err != nil {
 		return
 	}
@@ -165,6 +145,8 @@ func (s *Server) handleRawConn(conn net.Conn) {
 		s.removeConn(tcpConn)
 		s.wg.Done()
 	}()
+
+	s.Opts.Handler(EventAccept, tcpConn, nil)
 
 	s.wg.Add(1)
 	tcpConn.serve()
@@ -190,16 +172,12 @@ func (s *Server) removeConn(conn *Conn) {
 }
 
 // NewServer create a tcp server but not start to accept.
-func NewServer(opts *ServerOpts) *Server {
+// The opts will set to all accept conns.
+func NewServer(opts *Options) *Server {
 	s := &Server{
 		Opts:  opts,
 		stop:  make(chan struct{}),
 		conns: make(map[*Conn]bool),
 	}
-
-	if s.Opts.SendBufLen == 0 {
-		s.Opts.SendBufLen = DefaultSendBufLength
-	}
-
 	return s
 }
