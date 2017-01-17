@@ -17,8 +17,21 @@ type Server struct {
 	conns map[*Conn]bool
 }
 
+// ListenAndServe listens on the TCP network address addr and then
+// calls Serve to handle requests on incoming connections.
+func (s *Server) ListenAndServe(addr string) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	s.Serve(l)
+
+	return nil
+}
+
 // Serve start the tcp server to accept.
-func (s *Server) Serve(lisAddr string) {
+func (s *Server) Serve(l net.Listener) {
 	defer func() {
 		s.wg.Done()
 
@@ -34,17 +47,11 @@ func (s *Server) Serve(lisAddr string) {
 
 	s.wg.Add(1)
 
-	l, err := net.Listen("tcp", lisAddr)
-	if err != nil {
-		xlog.Fatalf("XTCP server: listen error: %v, addr: %v", err, lisAddr)
-		return
-	}
-
-	xlog.Info("XTCP server: listen on: ", l.Addr().String())
-
 	s.mu.Lock()
 	s.lis = l
 	s.mu.Unlock()
+
+	xlog.Info("XTCP server: listen on: ", l.Addr().String())
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 
@@ -130,10 +137,7 @@ func (s *Server) handleRawConn(conn net.Conn) {
 	}
 	s.mu.Unlock()
 
-	tcpConn, err := NewConn(s.Opts)
-	if err != nil {
-		return
-	}
+	tcpConn := NewConn(s.Opts)
 	tcpConn.RawConn = conn
 
 	if !s.addConn(tcpConn) {
@@ -146,7 +150,7 @@ func (s *Server) handleRawConn(conn net.Conn) {
 		s.wg.Done()
 	}()
 
-	s.Opts.Handler(EventAccept, tcpConn, nil)
+	s.Opts.Handler.OnEvent(EventAccept, tcpConn, nil)
 
 	s.wg.Add(1)
 	tcpConn.serve()

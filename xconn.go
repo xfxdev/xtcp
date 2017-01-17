@@ -39,12 +39,12 @@ type Conn struct {
 }
 
 // NewConn return new conn.
-func NewConn(opts *Options) (*Conn, error) {
+func NewConn(opts *Options) *Conn {
 	return &Conn{
 		Opts:         opts,
 		sendPackages: make(chan Package, opts.SendListLen),
 		close:        make(chan struct{}),
-	}, nil
+	}
 }
 
 func (c *Conn) String() string {
@@ -81,14 +81,15 @@ func (c *Conn) serve() {
 	go c.recv()
 	c.send()
 
-	c.Opts.Handler(EventClosed, c, nil)
+	c.Opts.Handler.OnEvent(EventClosed, c, nil)
 }
 
 func (c *Conn) recv() {
+	//defer xlog.Debug("recv exit.")
 	defer c.wg.Done()
 
 	c.wg.Add(1)
-	recvBuf := newBuffer(c.Opts.RecvBufInitSize, c.Opts.RecvBufMaxSize)
+	recvBuf := NewBuffer(c.Opts.RecvBufInitSize, c.Opts.RecvBufMaxSize)
 	if recvBuf == nil {
 		xlog.Error("Conn Recv error: cann't create recv buf")
 		return
@@ -96,12 +97,12 @@ func (c *Conn) recv() {
 
 	var tempDelay time.Duration
 	for {
-		err := recvBuf.grow(256)
+		err := recvBuf.Grow(256)
 		if err != nil {
 			xlog.Error("Conn Recv error: ", err)
 			return
 		}
-		_, err = recvBuf.tryRead(c.RawConn)
+		_, err = recvBuf.TryRead(c.RawConn)
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 				if tempDelay == 0 {
@@ -130,24 +131,24 @@ func (c *Conn) recv() {
 		tempDelay = 0
 
 		for {
-			if recvBuf.unreadLen() == 0 {
+			if recvBuf.UnreadLen() == 0 {
 				// no buf can unpack.
 				break
 			}
-			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.unreadBytes())
+			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.UnreadBytes())
 			if err != nil {
 				xlog.Error("Protocol unpack error: ", err)
 			}
 
 			if pl > 0 {
-				_, err = recvBuf.advance(pl)
+				_, err = recvBuf.Advance(pl)
 				if err != nil {
 					xlog.Error("Protocol unpack error: ", err)
 				}
 			}
 
 			if p != nil {
-				c.Opts.Handler(EventSend, c, p)
+				c.Opts.Handler.OnEvent(EventRecv, c, p)
 			} else {
 				break
 			}
@@ -188,11 +189,12 @@ func (c *Conn) sendBuf(buf []byte) error {
 }
 
 func (c *Conn) send() {
+	//defer xlog.Debug("send exit.")
 	defer c.wg.Done()
 
 	c.wg.Add(1)
 
-	sendBuf := newBuffer(256, 2048)
+	sendBuf := NewBuffer(256, 2048)
 
 	for {
 		select {
@@ -205,7 +207,7 @@ func (c *Conn) send() {
 				xlog.Error("Protocol pack error: ", err)
 				continue
 			}
-			buf, err := sendBuf.advance(sendBuf.unreadLen())
+			buf, err := sendBuf.Advance(sendBuf.UnreadLen())
 			if err != nil {
 				xlog.Error("Conn Recv error: ", err)
 				continue
@@ -214,7 +216,7 @@ func (c *Conn) send() {
 				return
 			}
 
-			c.Opts.Handler(EventSend, c, p)
+			c.Opts.Handler.OnEvent(EventSend, c, p)
 		case <-c.close:
 			if atomic.LoadInt32(&c.state) != 1 {
 				return
@@ -246,7 +248,7 @@ func (c *Conn) DialAndServe(addr string) error {
 
 	c.RawConn = rawConn
 
-	c.Opts.Handler(EventConnected, c, nil)
+	c.Opts.Handler.OnEvent(EventConnected, c, nil)
 
 	c.serve()
 

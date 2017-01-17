@@ -49,7 +49,9 @@ const (
 
 // Handler is the event callback.
 // p will be nil when event is EventAccept/EventConnected/EventClosed
-type Handler func(et EventType, c *Conn, p Package)
+type Handler interface {
+	OnEvent(et EventType, c *Conn, p Package)
+}
 
 // Package is the type of network protocol package.
 type Package interface {

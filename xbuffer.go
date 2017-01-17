@@ -6,38 +6,42 @@ import (
 )
 
 var (
-	// errTooLarge is passed to panic if memory cannot be allocated to store data in a buffer.
-	errTooLarge = errors.New("xtcp.buffer: too large")
-	// errNoSpace means that no space.
-	errNoSpace = errors.New("xtcp.buffer: no space can use")
-	// errNegativeCount means that negative count.
-	errNegativeCount = errors.New("xtcp.buffer: negative count")
+	// ErrNoMemory is passed to panic if memory cannot be allocated to store data in a buffer.
+	ErrNoMemory = errors.New("xtcp.buffer: no memory")
+	// ErrSpaceLimit means that the required space beyond the upper limit.
+	ErrSpaceLimit = errors.New("xtcp.buffer: required space beyond the upper limit")
+	// ErrNegativeCount means that negative count.
+	ErrNegativeCount = errors.New("xtcp.buffer: negative count")
 )
 
-// A buffer is a variable-sized buffer of bytes.
-type buffer struct {
+// A Buffer is a variable-sized buffer of bytes.
+type Buffer struct {
 	buf     []byte // raw buf.
 	or, ow  int    // read/write offset
 	maxSize int    // the max size can alloc of raw buf.
 }
 
-// unreadBytes returns a slice of length b.Len() holding the unread portion of the buffer.
+// UnreadBytes returns a slice of length b.Len() holding the unread portion of the buffer.
 // The slice is valid for use only until the next buffer modification.
-func (b *buffer) unreadBytes() []byte { return b.buf[b.or:b.ow] }
+func (b *Buffer) UnreadBytes() []byte { return b.buf[b.or:b.ow] }
 
-// unreadLen return the length of unread bytes.
-func (b *buffer) unreadLen() int { return b.ow - b.or }
+// UnreadLen return the length of unread bytes.
+func (b *Buffer) UnreadLen() int { return b.ow - b.or }
 
-// advance discard the n bytes from the last read.
+// Cap returns the capacity of the buffer's underlying byte slice, that is, the
+// total space allocated for the buffer's data.
+func (b *Buffer) Cap() int { return cap(b.buf) }
+
+// Advance discard the n bytes from the last read.
 // If n is negative return errNegativeCount.
-// If the buffer can't advance it will return errNoSpace.
-func (b *buffer) advance(n int) ([]byte, error) {
+// If the buffer can't advance it will return ErrSpaceLimit.
+func (b *Buffer) Advance(n int) ([]byte, error) {
 	if n < 0 {
-		return nil, errNegativeCount
+		return nil, ErrNegativeCount
 	}
 
 	if b.or+n > b.ow {
-		return nil, errNoSpace
+		return nil, ErrSpaceLimit
 	}
 
 	b.or += n
@@ -45,15 +49,15 @@ func (b *buffer) advance(n int) ([]byte, error) {
 	return b.buf[b.or-n : b.or], nil
 }
 
-// grow grows the buffer's capacity until to max size.
+// Grow grows the buffer's capacity until to max size.
 // After Grow(n), at least n bytes can be written to the
 // buffer without another allocation.
-// return errNegativeCount if n is negative.
-// return errNoSpace if need space size grater than the max size.
-// If the buffer can't alloc memory it will panic with ErrTooLarge.
-func (b *buffer) grow(n int) error {
+// return ErrNegativeCount if n is negative.
+// return ErrSpaceLimit if need space size grater than the max size.
+// If the buffer can't alloc memory it will panic with ErrNoMemory.
+func (b *Buffer) Grow(n int) error {
 	if n < 0 {
-		return errNegativeCount
+		return ErrNegativeCount
 	}
 
 	if b.or == b.ow && b.or != 0 {
@@ -72,8 +76,8 @@ func (b *buffer) grow(n int) error {
 			newSize := cap(b.buf)*2 + n
 			if newSize > b.maxSize {
 				newSize = b.maxSize
-				if newSize <= cap(b.buf) {
-					return errNoSpace
+				if newSize-lenRemain < n {
+					return ErrSpaceLimit
 				}
 			}
 			nb := makeSlice(newSize)
@@ -87,10 +91,7 @@ func (b *buffer) grow(n int) error {
 }
 
 // TryRead reads data from r to the remain space.
-func (b *buffer) tryRead(r io.Reader) (int, error) {
-	if b.ow == len(b.buf) {
-		return 0, errNoSpace
-	}
+func (b *Buffer) TryRead(r io.Reader) (int, error) {
 	n, err := r.Read(b.buf[b.ow:])
 	if n > 0 {
 		b.ow += n
@@ -101,15 +102,15 @@ func (b *buffer) tryRead(r io.Reader) (int, error) {
 
 // Write appends the contents of p to the buffer, growing the buffer as
 // needed. The return value n is the length of p;
-// return error will be errNoSpace if need space size grater than the max size.
-// If the buffer can't alloc memory it will panic with ErrTooLarge.
-func (b *buffer) Write(p []byte) (int, error) {
+// return error will be ErrSpaceLimit if need space size grater than the max size.
+// If the buffer can't alloc memory it will panic with ErrNoMemory.
+func (b *Buffer) Write(p []byte) (int, error) {
 	lenP := len(p)
 	if lenP == 0 {
 		// nothing to do.
 		return 0, nil
 	}
-	err := b.grow(lenP)
+	err := b.Grow(lenP)
 	if err != nil {
 		return 0, err
 	}
@@ -120,12 +121,12 @@ func (b *buffer) Write(p []byte) (int, error) {
 
 // NewBuffer create a new Buffer.
 // If initSize == 0 or initSize > maxSize it will return nil.
-// If create buffer failed it will panic with ErrTooLarge.
-func newBuffer(initSize, maxSize int) *buffer {
+// If create buffer failed it will panic with ErrNoMemory.
+func NewBuffer(initSize, maxSize int) *Buffer {
 	if initSize == 0 || initSize > maxSize {
 		return nil
 	}
-	b := &buffer{
+	b := &Buffer{
 		buf:     makeSlice(initSize),
 		maxSize: maxSize,
 	}
@@ -133,12 +134,12 @@ func newBuffer(initSize, maxSize int) *buffer {
 }
 
 // makeSlice allocates a slice of size n. If the allocation fails, it panics
-// with ErrTooLarge.
+// with ErrNoMemory.
 func makeSlice(n int) []byte {
 	// If the make fails, give a known error.
 	defer func() {
 		if recover() != nil {
-			panic(errTooLarge)
+			panic(ErrNoMemory)
 		}
 	}()
 	return make([]byte, n)
