@@ -3,6 +3,7 @@ package xtcp
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"reflect"
@@ -48,7 +49,7 @@ func (mp *myProtocol) Pack(p Package) ([]byte, error) {
 		_, err := mp.PackTo(p, buf)
 		return buf.Bytes(), err
 	}
-	return nil, errUnknownProtobufMsgType
+	return nil, errors.New("err pack size")
 }
 func (mp *myProtocol) Unpack(buf []byte) (Package, int, error) {
 	if len(buf) < 4 {
