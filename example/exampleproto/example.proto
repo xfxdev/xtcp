@@ -1,0 +1,17 @@
+syntax = "proto2";
+
+package exampleproto;
+
+
+message LoginRequest {
+    required string account = 1;
+    required string password = 2;
+}
+
+message LoginResponse {
+    required int32 ret = 1;   // 0: failed, 1: success.
+}
+
+message Chat {
+    required string msg = 1;
+}

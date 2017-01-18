@@ -15,35 +15,23 @@ var (
 	errSendEmptyBuf     = errors.New("send buf if empty")
 )
 
-// StopMode define the stop mode of server and conn.
-type StopMode uint8
-
-const (
-	// StopImmediately mean stop directly.
-	StopImmediately StopMode = iota
-	// StopGracefullyButNotWait mean stop gracefully but not wait.
-	StopGracefullyButNotWait
-	// StopGracefullyAndWait mean stop and wait.
-	StopGracefullyAndWait
-)
-
 // A Conn represents the server side of an tcp connection.
 type Conn struct {
-	Opts         *Options
-	RawConn      net.Conn
-	UserData     interface{}
-	sendPackages chan Package
-	close        chan struct{}
-	state        int32
-	wg           sync.WaitGroup
+	Opts        *Options
+	RawConn     net.Conn
+	UserData    interface{}
+	sendPackets chan Packet
+	close       chan struct{}
+	state       int32
+	wg          sync.WaitGroup
 }
 
 // NewConn return new conn.
 func NewConn(opts *Options) *Conn {
 	return &Conn{
-		Opts:         opts,
-		sendPackages: make(chan Package, opts.SendListLen),
-		close:        make(chan struct{}),
+		Opts:        opts,
+		sendPackets: make(chan Packet, opts.SendListLen),
+		close:       make(chan struct{}),
 	}
 }
 
@@ -198,7 +186,7 @@ func (c *Conn) send() {
 
 	for {
 		select {
-		case p := <-c.sendPackages:
+		case p := <-c.sendPackets:
 			if c.IsStoped() {
 				return
 			}
@@ -220,7 +208,7 @@ func (c *Conn) send() {
 		case <-c.close:
 			if atomic.LoadInt32(&c.state) != 1 {
 				return
-			} else if len(c.sendPackages) == 0 {
+			} else if len(c.sendPackets) == 0 {
 				// stop when state is closing and send buf list is empty.
 				atomic.StoreInt32(&c.state, 2)
 				c.RawConn.Close()
@@ -230,10 +218,10 @@ func (c *Conn) send() {
 	}
 }
 
-// Send will use the protocol to pack the package.
-func (c *Conn) Send(p Package) error {
+// Send will use the protocol to pack the Packet.
+func (c *Conn) Send(p Packet) error {
 	if atomic.LoadInt32(&c.state) == 0 {
-		c.sendPackages <- p
+		c.sendPackets <- p
 		return nil
 	}
 	return errSendToClosedConn

@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-type myPackage struct {
+type myPacket struct {
 	msg string
 }
 
-func (p *myPackage) String() string {
+func (p *myPacket) String() string {
 	return p.msg
 }
 
@@ -23,10 +23,10 @@ func (p *myPackage) String() string {
 type myProtocol struct {
 }
 
-func (mp *myProtocol) PackSize(p Package) int {
-	return 4 + len(p.(*myPackage).msg)
+func (mp *myProtocol) PackSize(p Packet) int {
+	return 4 + len(p.(*myPacket).msg)
 }
-func (mp *myProtocol) PackTo(p Package, w io.Writer) (int, error) {
+func (mp *myProtocol) PackTo(p Packet, w io.Writer) (int, error) {
 	msgLen := mp.PackSize(p)
 	wl := 0
 	err := binary.Write(w, binary.BigEndian, uint32(msgLen))
@@ -34,7 +34,7 @@ func (mp *myProtocol) PackTo(p Package, w io.Writer) (int, error) {
 		return wl, err
 	}
 
-	n, err := w.Write([]byte(p.(*myPackage).msg))
+	n, err := w.Write([]byte(p.(*myPacket).msg))
 	wl += n
 	if err != nil {
 		return wl, err
@@ -42,7 +42,7 @@ func (mp *myProtocol) PackTo(p Package, w io.Writer) (int, error) {
 
 	return wl, nil
 }
-func (mp *myProtocol) Pack(p Package) ([]byte, error) {
+func (mp *myProtocol) Pack(p Packet) ([]byte, error) {
 	len := mp.PackSize(p)
 	if len != 0 {
 		buf := bytes.NewBuffer(nil)
@@ -51,7 +51,7 @@ func (mp *myProtocol) Pack(p Package) ([]byte, error) {
 	}
 	return nil, errors.New("err pack size")
 }
-func (mp *myProtocol) Unpack(buf []byte) (Package, int, error) {
+func (mp *myProtocol) Unpack(buf []byte) (Packet, int, error) {
 	if len(buf) < 4 {
 		return nil, 0, nil
 	}
@@ -60,7 +60,7 @@ func (mp *myProtocol) Unpack(buf []byte) (Package, int, error) {
 		return nil, 0, nil
 	}
 	msg := string(buf[4:msgLen])
-	return &myPackage{msg: msg}, msgLen, nil
+	return &myPacket{msg: msg}, msgLen, nil
 }
 
 type myHandler struct {
@@ -69,25 +69,25 @@ type myHandler struct {
 	recvs []string
 }
 
-func (h *myHandler) OnEvent(et EventType, c *Conn, p Package) {
+func (h *myHandler) OnEvent(et EventType, c *Conn, p Packet) {
 	switch et {
 	case EventConnected:
 		// send first msg when client connected.
-		sendMsg := &myPackage{
+		sendMsg := &myPacket{
 			msg: h.name + time.Now().String(),
 		}
 		c.Send(sendMsg)
 	case EventSend:
-		msg := p.(*myPackage).msg
+		msg := p.(*myPacket).msg
 		h.sends = append(h.sends, msg)
 	case EventRecv:
-		msg := p.(*myPackage).msg
+		msg := p.(*myPacket).msg
 		h.recvs = append(h.recvs, msg)
 		if len(h.recvs) == 10 {
 			c.Stop(StopGracefullyButNotWait)
 		} else {
 
-			sendMsg := &myPackage{
+			sendMsg := &myPacket{
 				msg: h.name + time.Now().String(),
 			}
 			c.Send(sendMsg)

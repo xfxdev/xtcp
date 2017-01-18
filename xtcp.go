@@ -14,6 +14,18 @@ var (
 	DefaultRecvBufMaxSize = 4 << 10 // 4k
 )
 
+// StopMode define the stop mode of server and conn.
+type StopMode uint8
+
+const (
+	// StopImmediately mean stop directly.
+	StopImmediately StopMode = iota
+	// StopGracefullyButNotWait mean stop gracefully but not wait.
+	StopGracefullyButNotWait
+	// StopGracefullyAndWait mean stop and wait.
+	StopGracefullyAndWait
+)
+
 // EventType is the conn event type.
 type EventType int
 
@@ -37,7 +49,7 @@ func (et EventType) String() string {
 const (
 	// EventAccept mean server accept a new connect.
 	EventAccept EventType = iota
-	// EventConnected mean client connect to a server.
+	// EventConnected mean client connected to a server.
 	EventConnected
 	// EventSend mean conn send a packet.
 	EventSend
@@ -50,33 +62,33 @@ const (
 // Handler is the event callback.
 // p will be nil when event is EventAccept/EventConnected/EventClosed
 type Handler interface {
-	OnEvent(et EventType, c *Conn, p Package)
+	OnEvent(et EventType, c *Conn, p Packet)
 }
 
-// Package is the type of network protocol package.
-type Package interface {
+// Packet is the unit of data.
+type Packet interface {
 	fmt.Stringer
 }
 
-// Protocol is the protocol, use to pack/unpack package.
+// Protocol use to pack/unpack Packet.
 type Protocol interface {
-	// return the size need for pack the package.
-	PackSize(p Package) int
-	// PackTo pack the package to w.
+	// return the size need for pack the Packet.
+	PackSize(p Packet) int
+	// PackTo pack the Packet to w.
 	// The return value n is the number of bytes written;
 	// Any error encountered during the write is also returned.
-	PackTo(p Package, w io.Writer) (int, error)
-	// Pack pack the package to new created buf.
-	Pack(p Package) ([]byte, error)
-	// try to unpack the buf to package. If return len > 0, then buf[:len] will be discard.
+	PackTo(p Packet, w io.Writer) (int, error)
+	// Pack pack the Packet to new created buf.
+	Pack(p Packet) ([]byte, error)
+	// try to unpack the buf to Packet. If return len > 0, then buf[:len] will be discard.
 	// The following return conditions must be implement:
-	// (nil, 0, nil) : buf size not enough for unpack one package.
+	// (nil, 0, nil) : buf size not enough for unpack one Packet.
 	// (nil, len, err) : buf size enough but error encountered.
 	// (p, len, nil) : unpack succeed.
-	Unpack(buf []byte) (Package, int, error)
+	Unpack(buf []byte) (Packet, int, error)
 }
 
-// Options is options
+// Options is the options used for net conn.
 type Options struct {
 	Handler         Handler
 	Protocol        Protocol
