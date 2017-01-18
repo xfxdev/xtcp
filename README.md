@@ -147,4 +147,4 @@ const (
 The example define a protocol format which use protobuf inner.
 You can see how to define the protocol and how to create server and client.
 
-[example](https://github.com/xfxdev/xtcp/example)
+[example](https://github.com/xfxdev/xtcp/tree/master/example)
