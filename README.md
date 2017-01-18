@@ -8,7 +8,6 @@ A TCP Server Framework with simultaneous full duplex communication,graceful shut
 
 
 ## Install
-----
 
 ~~~
 go get github.com/xfxdev/xlog // xtcp use xlog inner.
@@ -16,7 +15,6 @@ go get github.com/xfxdev/xtcp
 ~~~
 
 ## Usage
-----
 
 ### define your protocol format:
 Before create server and client, you need define the protocol format first.
@@ -143,7 +141,6 @@ const (
 ~~~
 
 ## Example
-----
 The example define a protocol format which use protobuf inner.
 You can see how to define the protocol and how to create server and client.
 

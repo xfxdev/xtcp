@@ -10,7 +10,6 @@ In this example you can see:
 	* how to stop the server and client.
 
 ## Install
-----
 ~~~
 go get github.com/golang/protobuf/proto
 go get github.com/xfxdev/xlog	// xtcp use xlog inner.
