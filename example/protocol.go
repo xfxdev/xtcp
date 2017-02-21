@@ -118,7 +118,7 @@ func (pro *ProtobufProtocol) Unpack(buf []byte) (xtcp.Packet, int, error) {
 	}
 
 	msgLen := int(binary.BigEndian.Uint32(buf[:4]))
-	if len(buf) < msgLen {
+	if len(buf[4:]) < msgLen {
 		return nil, 0, nil
 	}
 
