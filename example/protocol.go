@@ -13,6 +13,7 @@ import (
 var (
 	errUnknownProtobufMsgType = errors.New("Unknown protobuf message type")
 	errBufSizeNotEnoughToPack = errors.New("buf size not enough")
+	errInvalidPacket          = errors.New("invalid packet")
 )
 
 // ProtobufPacket size : msglen + msgNameLen + len(msgName) + len(msgData)
@@ -123,6 +124,9 @@ func (pro *ProtobufProtocol) Unpack(buf []byte) (xtcp.Packet, int, error) {
 	}
 
 	msgNameLen := binary.BigEndian.Uint32(buf[4:8])
+	if int(msgNameLen)+8 > msgLen {
+		return nil, msgLen, errInvalidPacket
+	}
 	msgName := string(buf[8 : 8+msgNameLen])
 
 	t := proto.MessageType(msgName)
