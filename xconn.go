@@ -65,9 +65,15 @@ func (c *Conn) IsStoped() bool {
 }
 
 func (c *Conn) serve() {
+	var wg sync.WaitGroup
 
-	go c.recv()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.recv()
+	}()
 	c.send()
+	wg.Wait()
 
 	c.Opts.Handler.OnEvent(EventClosed, c, nil)
 }
