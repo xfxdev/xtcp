@@ -11,6 +11,7 @@ import (
 type processor func(c *xtcp.Conn, msg proto.Message)
 
 var (
+	protocol     = &ProtobufProtocol{}
 	mapProcessor = make(map[string]processor)
 	msghello     = "client : Hello"
 	msgByeBye    = "client : ByeBye"
@@ -31,7 +32,12 @@ func loginRequestProcess(c *xtcp.Conn, msg proto.Message) {
 		response := &exampleproto.LoginResponse{
 			Ret: proto.Int32(1),
 		}
-		c.Send(NewProtobufPacket(response))
+		buf, err := protocol.Pack(NewProtobufPacket(response))
+		if err != nil {
+			xlog.Error("failed to pack msg : ", err)
+			return
+		}
+		c.Send(buf)
 	}
 }
 func loginResponseProcess(c *xtcp.Conn, msg proto.Message) {
@@ -43,7 +49,7 @@ func loginResponseProcess(c *xtcp.Conn, msg proto.Message) {
 			chatMsg := &exampleproto.Chat{
 				Msg: proto.String(msghello),
 			}
-			c.Send(NewProtobufPacket(chatMsg))
+			c.SendPacket(NewProtobufPacket(chatMsg))
 		} else {
 			xlog.Info("login failed.")
 		}
@@ -76,7 +82,7 @@ func chatProcess(c *xtcp.Conn, msg proto.Message) {
 		msgChatResponse := &exampleproto.Chat{
 			Msg: proto.String(strResponseMsg),
 		}
-		c.Send(NewProtobufPacket(msgChatResponse))
+		c.SendPacket(NewProtobufPacket(msgChatResponse))
 	}
 }
 
@@ -104,9 +110,8 @@ func (h *myHandler) OnEvent(et xtcp.EventType, c *xtcp.Conn, p xtcp.Packet) {
 }
 
 func main() {
-	p := &ProtobufProtocol{}
 	h := &myHandler{}
-	opts := xtcp.NewOpts(h, p)
+	opts := xtcp.NewOpts(h, protocol)
 	l, err := net.Listen("tcp", ":")
 	if err != nil {
 		xlog.Error("listen err : ", err)
@@ -132,7 +137,7 @@ func main() {
 		Account:  proto.String("123"),
 		Password: proto.String("456"),
 	}
-	client.Send(NewProtobufPacket(msgLoginRequest))
+	client.SendPacket(NewProtobufPacket(msgLoginRequest))
 
 	<-clientClosed
 	server.Stop(xtcp.StopGracefullyAndWait)

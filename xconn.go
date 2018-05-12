@@ -268,13 +268,26 @@ func (c *Conn) sendLoop() {
 
 // Send use for send data, can be call in any goroutines.
 func (c *Conn) Send(buf []byte) (int, error) {
-	if atomic.LoadInt32(&c.state) == connStateNormal {
-		c.sendBufferCond.L.Lock()
-		defer c.sendBufferCond.L.Unlock()
-		defer c.sendBufferCond.Signal()
-		return c.sendBuffer.Write(buf)
+	if atomic.LoadInt32(&c.state) != connStateNormal {
+		return 0, errSendToClosedConn
 	}
-	return 0, errSendToClosedConn
+	c.sendBufferCond.L.Lock()
+	defer c.sendBufferCond.L.Unlock()
+	defer c.sendBufferCond.Signal()
+	return c.sendBuffer.Write(buf)
+}
+
+// SendPacket use for send packet, can be call in any goroutines.
+func (c *Conn) SendPacket(p Packet) (int, error) {
+	if atomic.LoadInt32(&c.state) != connStateNormal {
+		return 0, errSendToClosedConn
+	}
+	buf, err := c.Opts.Protocol.Pack(p)
+	if err != nil {
+		return 0, err
+	}
+
+	return c.Send(buf)
 }
 
 // DialAndServe connects to the addr and serve.
