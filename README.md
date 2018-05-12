@@ -51,8 +51,6 @@ const (
 	EventAccept EventType = iota
 	// EventConnected mean client connected to a server.
 	EventConnected
-	// EventSend mean conn send a packet.
-	EventSend
 	// EventRecv mean conn recv a packet.
 	EventRecv
 	// EventClosed mean conn is closed.
@@ -80,11 +78,7 @@ opts := xtcp.NewOpts(handler, protocol)
 server := xtcp.NewServer(opts)
 
 // 4. start.
-// note : ListenAndServe is a **block** function, if you don't want block, just run it in a goroutine.
-// go function() {
-//     server.ListenAndServe("addr")
-// }()
-server.ListenAndServe("addr")
+go server.ListenAndServe("addr")
 ~~~
 
 ### create client:
@@ -99,19 +93,13 @@ opts := xtcp.NewOpts(handler, protocol)
 client := NewConn(opts)
 
 // 4. start
-// note : DialAndServe is a **block** function, if you don't want block, just run it in a goroutine.
-// go function() {
-//     client.DialAndServe("addr")
-// }()
-client.DialAndServe("addr")
+go client.DialAndServe("addr")
 ~~~
 
 ### send and recv packet.
-To send a packet, just call the 'Send' function of Conn. You can safe call it in any goroutines.
-**Note** : Conn has a packets channel for send, so Send will **block** when the packets channel is full.
-You can set the channel length in the Options when create server or client.
+To send data, just call the 'Send' function of Conn. You can safe call it in any goroutines.
 ~~~
-func (c *Conn) Send(p Packet) error
+func (c *Conn) Send(buf []byte) error
 ~~~
 
 To recv a packet, implement your handler function:
@@ -125,17 +113,17 @@ func (h *myhandler) OnEvent(et EventType, c *Conn, p Packet) {
 ~~~
 
 ### stop
-xtcp have three stop modes, stop gracefully mean conn will stop until all the packets in the send channel sended.
+xtcp have three stop modes, stop gracefully mean conn will stop until all cached data sended.
 ~~~
 // StopMode define the stop mode of server and conn.
 type StopMode uint8
 
 const (
-	// StopImmediately mean stop directly.
+	// StopImmediately mean stop directly, the cached data maybe will not send.
 	StopImmediately StopMode = iota
-	// StopGracefullyButNotWait mean stop gracefully but not wait.
+	// StopGracefullyButNotWait stop and flush cached data.
 	StopGracefullyButNotWait
-	// StopGracefullyAndWait mean stop and wait.
+	// StopGracefullyAndWait stop and block until cached data sended.
 	StopGracefullyAndWait
 )
 ~~~

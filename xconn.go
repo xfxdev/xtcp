@@ -1,8 +1,9 @@
 package xtcp
 
 import (
+	"bytes"
 	"errors"
-	"github.com/xfxdev/xlog"
+	log "github.com/xfxdev/xlog"
 	"io"
 	"net"
 	"sync"
@@ -12,103 +13,147 @@ import (
 
 var (
 	errSendToClosedConn = errors.New("send to closed conn")
-	errSendEmptyBuf     = errors.New("send buf if empty")
+	bufferPool          = sync.Pool{}
+)
+
+const (
+	connStateNormal int32 = iota
+	connStateStopping
+	connStateStopped
 )
 
 // A Conn represents the server side of an tcp connection.
 type Conn struct {
-	Opts        *Options
-	RawConn     net.Conn
-	UserData    interface{}
-	sendPackets chan Packet
-	close       chan struct{}
-	state       int32
-	wg          sync.WaitGroup
+	Opts           *Options
+	RawConn        net.Conn
+	UserData       interface{}
+	sendBuffer     *bytes.Buffer
+	sendBufferCond *sync.Cond
+	state          int32
+	wg             sync.WaitGroup
+	once           sync.Once
+	SendDropped    uint32
+	sendBytes      uint64
+	recvBytes      uint64
 }
 
 // NewConn return new conn.
 func NewConn(opts *Options) *Conn {
-	return &Conn{
-		Opts:        opts,
-		sendPackets: make(chan Packet, opts.SendListLen),
-		close:       make(chan struct{}),
+	if opts.RecvBufSize <= 0 {
+		log.Warnf("Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
+		opts.RecvBufSize = DefaultRecvBufSize
 	}
+	c := &Conn{
+		Opts:           opts,
+		sendBufferCond: sync.NewCond(&sync.Mutex{}),
+		state:          connStateNormal,
+	}
+	c.sendBuffer = c.getBufferFromPool()
+
+	return c
+}
+
+func (c *Conn) getBufferFromPool() *bytes.Buffer {
+	itr := bufferPool.Get()
+	if itr != nil {
+		buffer := itr.(*bytes.Buffer)
+		buffer.Reset()
+		return buffer
+	}
+	return bytes.NewBuffer(make([]byte, 0, c.Opts.RecvBufSize))
 }
 
 func (c *Conn) String() string {
 	return c.RawConn.LocalAddr().String() + " -> " + c.RawConn.RemoteAddr().String()
 }
 
+func (c *Conn) SendBytes() uint64 {
+	return atomic.LoadUint64(&c.sendBytes)
+}
+
+func (c *Conn) RecvBytes() uint64 {
+	return atomic.LoadUint64(&c.recvBytes)
+}
+
 // Stop stops the conn.
-// StopImmediately: immediately closes recv and send.
-// StopGracefullyButNotWait: stop accept new send, but all send bufs in the send list will continue send.
-// StopGracefullyAndWait: stop accept new send, will block until all send bufs in the send list are sended.
 func (c *Conn) Stop(mode StopMode) {
-	if atomic.LoadInt32(&c.state) == 0 {
+	c.once.Do(func() {
 		if mode == StopImmediately {
-			atomic.StoreInt32(&c.state, 2)
-			close(c.close)
+			atomic.StoreInt32(&c.state, connStateStopped)
 			c.RawConn.Close()
+			c.sendBufferCond.Signal() // notify sendLoop to exit wait, call after state changed.
 		} else {
-			atomic.StoreInt32(&c.state, 1)
-			close(c.close)
+			atomic.StoreInt32(&c.state, connStateStopping)
+			// c.RawConn.Close() // will close in sendLoop
+			c.sendBufferCond.Signal() // notify sendLoop to exit wait, call after state changed.
 			if mode == StopGracefullyAndWait {
 				c.wg.Wait()
 			}
 		}
-	}
+	})
 }
 
-// IsStoped return true if Conn is closed, otherwise return false.
+// IsStoped return true if Conn is stopped, otherwise return false.
 func (c *Conn) IsStoped() bool {
-	return atomic.LoadInt32(&c.state) == 2
+	return atomic.LoadInt32(&c.state) != connStateNormal
 }
 
 func (c *Conn) serve() {
+	tcpConn := c.RawConn.(*net.TCPConn)
+	tcpConn.SetNoDelay(c.Opts.NoDelay)
+	tcpConn.SetKeepAlive(c.Opts.KeepAlive)
+	if c.Opts.KeepAlivePeriod != 0 {
+		tcpConn.SetKeepAlivePeriod(c.Opts.KeepAlivePeriod)
+	}
 
-	go c.recv()
-	c.send()
+	c.wg.Add(2)
+	go c.sendLoop()
+	c.recvLoop()
 
 	c.Opts.Handler.OnEvent(EventClosed, c, nil)
 }
 
-func (c *Conn) recv() {
-	//defer xlog.Debug("recv exit.")
-	defer c.wg.Done()
-
-	c.wg.Add(1)
-	recvBuf := NewBuffer(c.Opts.RecvBufInitSize, c.Opts.RecvBufMaxSize)
-	if recvBuf == nil {
-		xlog.Error("Conn Recv error: cann't create recv buf")
-		return
-	}
-
+func (c *Conn) recvLoop() {
 	var tempDelay time.Duration
+	tempBuf := make([]byte, c.Opts.RecvBufSize)
+	recvBuf := c.getBufferFromPool()
+	maxDelay := 1 * time.Second
+
+	defer func() {
+		log.Debug("XTCP - Conn recv loop exit : ", c.RawConn.RemoteAddr())
+
+		bufferPool.Put(recvBuf)
+		c.wg.Done()
+	}()
+
 	for {
-		err := recvBuf.Grow(256)
-		if err != nil {
-			xlog.Error("Conn Recv error: ", err)
-			return
+		if c.Opts.ReadDeadline != 0 {
+			c.RawConn.SetReadDeadline(time.Now().Add(c.Opts.ReadDeadline))
 		}
-		_, err = recvBuf.TryRead(c.RawConn)
+
+		n, err := c.RawConn.Read(tempBuf)
 		if err != nil {
-			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
+			if nerr, ok := err.(net.Error); ok {
+				if nerr.Timeout() {
+					// timeout
+				} else if nerr.Temporary() {
+					if tempDelay == 0 {
+						tempDelay = 5 * time.Millisecond
+					} else {
+						tempDelay *= 2
+					}
+					if tempDelay > maxDelay {
+						tempDelay = maxDelay
+					}
+					log.Errorf("XTCP - Conn[%v] recv error : %v; retrying in %v", c.RawConn.RemoteAddr(), err, tempDelay)
+					time.Sleep(tempDelay)
+					continue
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				xlog.Errorf("Conn Recv error: %v; retrying in %v", err, tempDelay)
-				time.Sleep(tempDelay)
-				continue
 			}
 
 			if !c.IsStoped() {
 				if err != io.EOF {
-					xlog.Error("Conn Recv error: ", err)
+					log.Errorf("XTCP - Conn[%v] recv error : ", c.RawConn.RemoteAddr(), err)
 				}
 				c.Stop(StopImmediately)
 			}
@@ -116,23 +161,22 @@ func (c *Conn) recv() {
 			return
 		}
 
+		recvBuf.Write(tempBuf[:n])
+		atomic.AddUint64(&c.recvBytes, uint64(n))
 		tempDelay = 0
 
-		for {
-			if recvBuf.UnreadLen() == 0 {
-				// no buf can unpack.
-				break
-			}
-			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.UnreadBytes())
+		for recvBuf.Len() > 0 {
+			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.Bytes())
 			if err != nil {
-				xlog.Error("Protocol unpack error: ", err)
+				buf := recvBuf.Bytes()
+				if len(buf) > 128 {
+					buf = buf[:128]
+				}
+				log.Errorf("XTCP - Conn[%v] protocol unpack error: %v, BufLen : %v, Buf : %v", c.RawConn.RemoteAddr(), err, len(recvBuf.Bytes()), buf)
 			}
 
 			if pl > 0 {
-				_, err = recvBuf.Advance(pl)
-				if err != nil {
-					xlog.Error("Protocol unpack error: ", err)
-				}
+				_ = recvBuf.Next(pl)
 			}
 
 			if p != nil {
@@ -147,84 +191,90 @@ func (c *Conn) recv() {
 func (c *Conn) sendBuf(buf []byte) error {
 	sended := 0
 	var tempDelay time.Duration
+	maxDelay := 1 * time.Second
 	for sended < len(buf) {
+		if c.Opts.WriteDeadline != 0 {
+			c.RawConn.SetWriteDeadline(time.Now().Add(c.Opts.WriteDeadline))
+		}
 		wn, err := c.RawConn.Write(buf[sended:])
+		sended += wn
+		atomic.AddUint64(&c.sendBytes, uint64(wn))
+
 		if err != nil {
-			if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
+			if nerr, ok := err.(net.Error); ok {
+				if nerr.Timeout() {
+					// timeout
+				} else if nerr.Temporary() {
+					if tempDelay == 0 {
+						tempDelay = 5 * time.Millisecond
+					} else {
+						tempDelay *= 2
+					}
+					if tempDelay > maxDelay {
+						tempDelay = maxDelay
+					}
+					log.Errorf("XTCP - Conn[%v] Send error: %v; retrying in %v", c.RawConn.RemoteAddr(), err, tempDelay)
+					time.Sleep(tempDelay)
+					continue
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				xlog.Errorf("Conn Send error: %v; retrying in %v", err, tempDelay)
-				time.Sleep(tempDelay)
-				continue
 			}
 
 			if !c.IsStoped() {
-				xlog.Error("Conn Send error: ", err)
+				log.Errorf("XTCP - Conn[%v] Send error : %v", c.RawConn.RemoteAddr(), err)
 				c.Stop(StopImmediately)
 			}
 			return err
 		}
 		tempDelay = 0
-		sended += wn
 	}
 	return nil
 }
 
-func (c *Conn) send() {
-	//defer xlog.Debug("send exit.")
-	defer c.wg.Done()
+func (c *Conn) sendLoop() {
+	defer func() {
+		log.Debug("XTCP - Conn send loop exit : ", c.RawConn.RemoteAddr())
 
-	c.wg.Add(1)
-
-	sendBuf := NewBuffer(256, 2048)
-
+		bufferPool.Put(c.sendBuffer)
+		c.wg.Done()
+	}()
 	for {
-		select {
-		case p := <-c.sendPackets:
-			if c.IsStoped() {
-				return
-			}
-			_, err := c.Opts.Protocol.PackTo(p, sendBuf)
-			if err != nil {
-				xlog.Error("Protocol pack error: ", err)
-				continue
-			}
-			buf, err := sendBuf.Advance(sendBuf.UnreadLen())
-			if err != nil {
-				xlog.Error("Conn Recv error: ", err)
-				continue
-			}
-			if c.sendBuf(buf) != nil {
-				return
-			}
+		c.sendBufferCond.L.Lock()
+		for c.sendBuffer.Len() == 0 && atomic.LoadInt32(&c.state) == connStateNormal {
+			c.sendBufferCond.Wait()
+		}
 
-			c.Opts.Handler.OnEvent(EventSend, c, p)
-		case <-c.close:
-			if atomic.LoadInt32(&c.state) != 1 {
-				return
-			} else if len(c.sendPackets) == 0 {
-				// stop when state is closing and send buf list is empty.
-				atomic.StoreInt32(&c.state, 2)
-				c.RawConn.Close()
+		switch atomic.LoadInt32(&c.state) {
+		case connStateNormal:
+			err := c.sendBuf(c.sendBuffer.Bytes())
+			c.sendBuffer.Reset()
+			c.sendBufferCond.L.Unlock()
+			if err != nil {
 				return
 			}
+		case connStateStopping:
+			c.sendBuf(c.sendBuffer.Bytes())
+			c.sendBuffer.Reset()
+			c.sendBufferCond.L.Unlock()
+
+			atomic.StoreInt32(&c.state, connStateStopped)
+			c.RawConn.Close()
+			return
+		case connStateStopped:
+			c.sendBufferCond.L.Unlock()
+			return
 		}
 	}
 }
 
-// Send will use the protocol to pack the Packet.
-func (c *Conn) Send(p Packet) error {
-	if atomic.LoadInt32(&c.state) == 0 {
-		c.sendPackets <- p
-		return nil
+// Send use for send data, can be call in any goroutines.
+func (c *Conn) Send(buf []byte) (int, error) {
+	if atomic.LoadInt32(&c.state) == connStateNormal {
+		c.sendBufferCond.L.Lock()
+		defer c.sendBufferCond.L.Unlock()
+		defer c.sendBufferCond.Signal()
+		return c.sendBuffer.Write(buf)
 	}
-	return errSendToClosedConn
+	return 0, errSendToClosedConn
 }
 
 // DialAndServe connects to the addr and serve.

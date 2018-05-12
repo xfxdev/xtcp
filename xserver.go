@@ -1,7 +1,7 @@
 package xtcp
 
 import (
-	"github.com/xfxdev/xlog"
+	log "github.com/xfxdev/xlog"
 	"net"
 	"sync"
 	"time"
@@ -9,12 +9,13 @@ import (
 
 // Server used for running a tcp server.
 type Server struct {
-	Opts  *Options
-	stop  chan struct{}
-	wg    sync.WaitGroup
-	mu    sync.Mutex
-	lis   net.Listener
-	conns map[*Conn]bool
+	Opts    *Options
+	stopped chan struct{}
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	once    sync.Once
+	lis     net.Listener
+	conns   map[*Conn]bool
 }
 
 // ListenAndServe listens on the TCP network address addr and then
@@ -32,18 +33,7 @@ func (s *Server) ListenAndServe(addr string) error {
 
 // Serve start the tcp server to accept.
 func (s *Server) Serve(l net.Listener) {
-	defer func() {
-		s.wg.Done()
-
-		s.mu.Lock()
-		lis := s.lis
-		s.lis = nil
-		s.mu.Unlock()
-
-		if lis != nil {
-			lis.Close()
-		}
-	}()
+	defer s.wg.Done()
 
 	s.wg.Add(1)
 
@@ -51,9 +41,10 @@ func (s *Server) Serve(l net.Listener) {
 	s.lis = l
 	s.mu.Unlock()
 
-	xlog.Info("XTCP server: listen on: ", l.Addr().String())
+	log.Info("XTCP - Server listen on: ", l.Addr().String())
 
 	var tempDelay time.Duration // how long to sleep on accept failure
+	maxDelay := 1 * time.Second
 
 	for {
 		conn, err := l.Accept()
@@ -64,23 +55,21 @@ func (s *Server) Serve(l net.Listener) {
 				} else {
 					tempDelay *= 2
 				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
+				if tempDelay > maxDelay {
+					tempDelay = maxDelay
 				}
-				xlog.Errorf("XTCP Server: Accept error: %v; retrying in %v", err, tempDelay)
+				log.Errorf("XTCP - Server Accept error: %v; retrying in %v", err, tempDelay)
 				select {
 				case <-time.After(tempDelay):
 					continue
-				case <-s.stop:
+				case <-s.stopped:
 					return
 				}
 			}
 
-			select {
-			case <-s.stop:
-				// don't log if listener closed.
-			default:
-				xlog.Errorf("XTCP Server: Accept error: %v; server closed!", err)
+			if !s.IsStopped() {
+				log.Errorf("XTCP - Server Accept error: %v; server closed!", err)
+				s.Stop(StopImmediately)
 			}
 
 			return
@@ -91,46 +80,54 @@ func (s *Server) Serve(l net.Listener) {
 	}
 }
 
+func (s *Server) IsStopped() bool {
+	select {
+	case <-s.stopped:
+		return true
+	default:
+		return false
+	}
+}
+
 // Stop stops the tcp server.
 // StopImmediately: immediately closes all open connections and listener.
-// StopGracefullyButNotWait: stops the server to accept new connections.
-// StopGracefullyAndWait: stops the server to accept new connections and blocks until all connections are closed.
+// StopGracefullyButNotWait: stops the server and stop all connections gracefully.
+// StopGracefullyAndWait: stops the server and blocks until all connections are stopped gracefully.
 func (s *Server) Stop(mode StopMode) {
-	close(s.stop)
+	s.once.Do(func() {
+		close(s.stopped)
 
-	s.mu.Lock()
+		s.mu.Lock()
+		lis := s.lis
+		s.lis = nil
+		conns := s.conns
+		s.conns = nil
+		s.mu.Unlock()
 
-	lis := s.lis
-	s.lis = nil
+		if lis != nil {
+			lis.Close()
+		}
 
-	conns := s.conns
-	s.conns = nil
+		m := mode
+		if m == StopGracefullyAndWait {
+			// don't wait each conn stop.
+			m = StopGracefullyButNotWait
+		}
+		for c := range conns {
+			c.Stop(m)
+		}
 
-	s.mu.Unlock()
+		if mode == StopGracefullyAndWait {
+			s.wg.Wait()
+		}
 
-	if lis != nil {
-		lis.Close()
-	}
-
-	m := mode
-	if m == StopGracefullyAndWait {
-		// don't wait each conn stop.
-		m = StopGracefullyButNotWait
-	}
-	for c := range conns {
-		c.Stop(m)
-	}
-
-	if mode == StopGracefullyAndWait {
-		s.wg.Wait()
-	}
-
-	xlog.Info("XTCP server stop.")
+		log.Info("XTCP - Server stopped.")
+	})
 }
 
 func (s *Server) handleRawConn(conn net.Conn) {
 	s.mu.Lock()
-	if s.conns == nil {
+	if s.conns == nil { // s.conns == nil mean server stopped
 		s.mu.Unlock()
 		conn.Close()
 		return
@@ -145,6 +142,7 @@ func (s *Server) handleRawConn(conn net.Conn) {
 		return
 	}
 
+	s.wg.Add(1)
 	defer func() {
 		s.removeConn(tcpConn)
 		s.wg.Done()
@@ -152,7 +150,6 @@ func (s *Server) handleRawConn(conn net.Conn) {
 
 	s.Opts.Handler.OnEvent(EventAccept, tcpConn, nil)
 
-	s.wg.Add(1)
 	tcpConn.serve()
 }
 
@@ -175,13 +172,23 @@ func (s *Server) removeConn(conn *Conn) {
 	s.mu.Unlock()
 }
 
+func (s *Server) CurClientCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
+}
+
 // NewServer create a tcp server but not start to accept.
 // The opts will set to all accept conns.
 func NewServer(opts *Options) *Server {
+	if opts.RecvBufSize <= 0 {
+		log.Warnf("Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
+		opts.RecvBufSize = DefaultRecvBufSize
+	}
 	s := &Server{
-		Opts:  opts,
-		stop:  make(chan struct{}),
-		conns: make(map[*Conn]bool),
+		Opts:    opts,
+		stopped: make(chan struct{}),
+		conns:   make(map[*Conn]bool),
 	}
 	return s
 }
