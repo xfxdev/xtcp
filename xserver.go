@@ -1,10 +1,11 @@
 package xtcp
 
 import (
-	log "github.com/xfxdev/xlog"
 	"net"
 	"sync"
 	"time"
+
+	log "github.com/xfxdev/xlog"
 )
 
 // Server used for running a tcp server.
@@ -80,6 +81,7 @@ func (s *Server) Serve(l net.Listener) {
 	}
 }
 
+// IsStopped check if server is stopped.
 func (s *Server) IsStopped() bool {
 	select {
 	case <-s.stopped:
@@ -172,6 +174,7 @@ func (s *Server) removeConn(conn *Conn) {
 	s.mu.Unlock()
 }
 
+// CurClientCount return current client count.
 func (s *Server) CurClientCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -184,6 +187,10 @@ func NewServer(opts *Options) *Server {
 	if opts.RecvBufSize <= 0 {
 		log.Warnf("Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
 		opts.RecvBufSize = DefaultRecvBufSize
+	}
+	if opts.SendBufListLen <= 0 {
+		log.Warnf("Invalid Opts.SendBufListLen : %v, use DefaultSendBufListLen instead", opts.SendBufListLen)
+		opts.SendBufListLen = DefaultSendBufListLen
 	}
 	s := &Server{
 		Opts:    opts,

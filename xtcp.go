@@ -9,6 +9,8 @@ import (
 var (
 	// DefaultRecvBufSize is the default size of recv buf.
 	DefaultRecvBufSize = 4 << 10 // 4k
+	// DefaultSendBufListLen is the default length of send buf list.
+	DefaultSendBufListLen = 1 << 10 // 1k
 )
 
 // StopMode define the stop mode of server and conn.
@@ -87,6 +89,7 @@ type Options struct {
 	Handler         Handler
 	Protocol        Protocol
 	RecvBufSize     int           // default is DefaultRecvBufSize if you don't set.
+	SendBufListLen  int           // default is DefaultSendBufListLen if you don't set.
 	NoDelay         bool          // default is true
 	KeepAlive       bool          // default is false
 	KeepAlivePeriod time.Duration // default is 0, mean use system setting.
@@ -102,10 +105,11 @@ func NewOpts(h Handler, p Protocol) *Options {
 		panic("xtcp.NewOpts: nil handler or protocol")
 	}
 	return &Options{
-		Handler:     h,
-		Protocol:    p,
-		RecvBufSize: DefaultRecvBufSize,
-		NoDelay:     true,
-		KeepAlive:   false,
+		Handler:        h,
+		Protocol:       p,
+		RecvBufSize:    DefaultRecvBufSize,
+		SendBufListLen: DefaultSendBufListLen,
+		NoDelay:        true,
+		KeepAlive:      false,
 	}
 }

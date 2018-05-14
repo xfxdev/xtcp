@@ -3,38 +3,101 @@ package xtcp
 import (
 	"bytes"
 	"errors"
-	log "github.com/xfxdev/xlog"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-var (
-	errSendToClosedConn = errors.New("send to closed conn")
-	bufferPool          = sync.Pool{}
+	log "github.com/xfxdev/xlog"
 )
 
 const (
 	connStateNormal int32 = iota
 	connStateStopping
 	connStateStopped
+
+	smallBufferSize = 64
 )
+
+var (
+	errSendToClosedConn = errors.New("send to closed conn")
+	errSendListFull     = errors.New("send buffer list full")
+
+	bufferPoolSmall = &sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(nil)
+		},
+	}
+	bufferPool1K = &sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 1<<10))
+		},
+	}
+	bufferPool2K = &sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 2<<10))
+		},
+	}
+	bufferPool4K = &sync.Pool{
+		New: func() interface{} {
+			return bytes.NewBuffer(make([]byte, 0, 4<<10))
+		},
+	}
+	bufferPoolBig = &sync.Pool{}
+)
+
+func getBufferFromPool(targetSize int) *bytes.Buffer {
+	var buf *bytes.Buffer
+	if targetSize <= smallBufferSize {
+		buf = bufferPoolSmall.Get().(*bytes.Buffer)
+	} else if targetSize <= 1<<10 {
+		buf = bufferPool1K.Get().(*bytes.Buffer)
+	} else if targetSize <= 2<<10 {
+		buf = bufferPool2K.Get().(*bytes.Buffer)
+	} else if targetSize <= 4<<10 {
+		buf = bufferPool4K.Get().(*bytes.Buffer)
+	} else {
+		itr := bufferPoolBig.Get()
+		if itr != nil {
+			buf = itr.(*bytes.Buffer)
+		} else {
+			buf = bytes.NewBuffer(make([]byte, 0, targetSize))
+		}
+	}
+	buf.Reset()
+	return buf
+}
+
+func putBufferToPool(buffer *bytes.Buffer) {
+	cap := buffer.Cap()
+	if cap <= smallBufferSize {
+		bufferPoolSmall.Put(buffer)
+	} else if cap <= 1<<10 {
+		bufferPool1K.Put(buffer)
+	} else if cap <= 2<<10 {
+		bufferPool2K.Put(buffer)
+	} else if cap <= 4<<10 {
+		bufferPool4K.Put(buffer)
+	} else {
+		bufferPoolBig.Put(buffer)
+	}
+}
 
 // A Conn represents the server side of an tcp connection.
 type Conn struct {
-	Opts           *Options
-	RawConn        net.Conn
-	UserData       interface{}
-	sendBuffer     *bytes.Buffer
-	sendBufferCond *sync.Cond
-	state          int32
-	wg             sync.WaitGroup
-	once           sync.Once
-	SendDropped    uint32
-	sendBytes      uint64
-	recvBytes      uint64
+	Opts        *Options
+	RawConn     net.Conn
+	UserData    interface{}
+	sendBufList chan *bytes.Buffer
+	closed      chan struct{}
+	state       int32
+	wg          sync.WaitGroup
+	once        sync.Once
+	SendDropped uint32
+	sendBytes   uint64
+	recvBytes   uint64
+	dropped     uint32
 }
 
 // NewConn return new conn.
@@ -43,36 +106,37 @@ func NewConn(opts *Options) *Conn {
 		log.Warnf("Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
 		opts.RecvBufSize = DefaultRecvBufSize
 	}
-	c := &Conn{
-		Opts:           opts,
-		sendBufferCond: sync.NewCond(&sync.Mutex{}),
-		state:          connStateNormal,
+	if opts.SendBufListLen <= 0 {
+		log.Warnf("Invalid Opts.SendBufListLen : %v, use DefaultRecvBufSize instead", opts.SendBufListLen)
+		opts.SendBufListLen = DefaultSendBufListLen
 	}
-	c.sendBuffer = c.getBufferFromPool()
+	c := &Conn{
+		Opts:        opts,
+		sendBufList: make(chan *bytes.Buffer, opts.SendBufListLen),
+		closed:      make(chan struct{}),
+		state:       connStateNormal,
+	}
 
 	return c
-}
-
-func (c *Conn) getBufferFromPool() *bytes.Buffer {
-	itr := bufferPool.Get()
-	if itr != nil {
-		buffer := itr.(*bytes.Buffer)
-		buffer.Reset()
-		return buffer
-	}
-	return bytes.NewBuffer(make([]byte, 0, c.Opts.RecvBufSize))
 }
 
 func (c *Conn) String() string {
 	return c.RawConn.LocalAddr().String() + " -> " + c.RawConn.RemoteAddr().String()
 }
 
+// SendBytes return the total send bytes.
 func (c *Conn) SendBytes() uint64 {
 	return atomic.LoadUint64(&c.sendBytes)
 }
 
+// RecvBytes return the total receive bytes.
 func (c *Conn) RecvBytes() uint64 {
 	return atomic.LoadUint64(&c.recvBytes)
+}
+
+// DroppedPacket return the total dropped packet.
+func (c *Conn) DroppedPacket() uint32 {
+	return atomic.LoadUint32(&c.dropped)
 }
 
 // Stop stops the conn.
@@ -81,11 +145,13 @@ func (c *Conn) Stop(mode StopMode) {
 		if mode == StopImmediately {
 			atomic.StoreInt32(&c.state, connStateStopped)
 			c.RawConn.Close()
-			c.sendBufferCond.Signal() // notify sendLoop to exit wait, call after state changed.
+			close(c.sendBufList)
+			close(c.closed)
 		} else {
 			atomic.StoreInt32(&c.state, connStateStopping)
-			// c.RawConn.Close() // will close in sendLoop
-			c.sendBufferCond.Signal() // notify sendLoop to exit wait, call after state changed.
+			// c.RawConn.Close() 	// will close in sendLoop
+			// close(c.sendBufList) // will close in sendLoop
+			close(c.closed)
 			if mode == StopGracefullyAndWait {
 				c.wg.Wait()
 			}
@@ -116,13 +182,13 @@ func (c *Conn) serve() {
 func (c *Conn) recvLoop() {
 	var tempDelay time.Duration
 	tempBuf := make([]byte, c.Opts.RecvBufSize)
-	recvBuf := c.getBufferFromPool()
+	recvBuf := getBufferFromPool(c.Opts.RecvBufSize)
 	maxDelay := 1 * time.Second
 
 	defer func() {
 		log.Debug("XTCP - Conn recv loop exit : ", c.RawConn.RemoteAddr())
 
-		bufferPool.Put(recvBuf)
+		putBufferToPool(recvBuf)
 		c.wg.Done()
 	}()
 
@@ -233,35 +299,32 @@ func (c *Conn) sendBuf(buf []byte) error {
 func (c *Conn) sendLoop() {
 	defer func() {
 		log.Debug("XTCP - Conn send loop exit : ", c.RawConn.RemoteAddr())
-
-		bufferPool.Put(c.sendBuffer)
 		c.wg.Done()
 	}()
 	for {
-		c.sendBufferCond.L.Lock()
-		for c.sendBuffer.Len() == 0 && atomic.LoadInt32(&c.state) == connStateNormal {
-			c.sendBufferCond.Wait()
+		if atomic.LoadInt32(&c.state) == connStateStopped {
+			return
 		}
 
-		switch atomic.LoadInt32(&c.state) {
-		case connStateNormal:
-			err := c.sendBuf(c.sendBuffer.Bytes())
-			c.sendBuffer.Reset()
-			c.sendBufferCond.L.Unlock()
+		select {
+		case buffer, ok := <-c.sendBufList:
+			if !ok {
+				return
+			}
+			err := c.sendBuf(buffer.Bytes())
 			if err != nil {
 				return
 			}
-		case connStateStopping:
-			c.sendBuf(c.sendBuffer.Bytes())
-			c.sendBuffer.Reset()
-			c.sendBufferCond.L.Unlock()
-
-			atomic.StoreInt32(&c.state, connStateStopped)
-			c.RawConn.Close()
-			return
-		case connStateStopped:
-			c.sendBufferCond.L.Unlock()
-			return
+			putBufferToPool(buffer)
+		case <-c.closed:
+			if atomic.LoadInt32(&c.state) == connStateStopping {
+				if len(c.sendBufList) == 0 {
+					atomic.SwapInt32(&c.state, connStateStopped)
+					close(c.sendBufList)
+					c.RawConn.Close()
+					return
+				}
+			}
 		}
 	}
 }
@@ -271,10 +334,22 @@ func (c *Conn) Send(buf []byte) (int, error) {
 	if atomic.LoadInt32(&c.state) != connStateNormal {
 		return 0, errSendToClosedConn
 	}
-	c.sendBufferCond.L.Lock()
-	defer c.sendBufferCond.L.Unlock()
-	defer c.sendBufferCond.Signal()
-	return c.sendBuffer.Write(buf)
+	bufLen := len(buf)
+	if bufLen <= 0 {
+		return 0, nil
+	}
+	buffer := getBufferFromPool(len(buf))
+	n, err := buffer.Write(buf)
+	if err != nil {
+		return 0, err
+	}
+	select {
+	case c.sendBufList <- buffer:
+		return n, nil
+	default:
+		atomic.AddUint32(&c.dropped, 1)
+		return 0, errSendListFull
+	}
 }
 
 // SendPacket use for send packet, can be call in any goroutines.
