@@ -1,9 +1,7 @@
 language: go
 go:
- - 1.6
- - 1.7
  - master
  - tip
 
 script:
- - go test -v ./...
+ - cd ./example && go build && ./example
