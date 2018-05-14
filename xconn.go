@@ -329,6 +329,17 @@ func (c *Conn) sendLoop() {
 	}
 }
 
+func (c *Conn) sendByteBuffer(buffer *bytes.Buffer) (int, error) {
+	select {
+	case c.sendBufList <- buffer:
+		return buffer.Len(), nil
+	default:
+		putBufferToPool(buffer)
+		atomic.AddUint32(&c.dropped, 1)
+		return 0, errSendListFull
+	}
+}
+
 // Send use for send data, can be call in any goroutines.
 func (c *Conn) Send(buf []byte) (int, error) {
 	if atomic.LoadInt32(&c.state) != connStateNormal {
@@ -339,17 +350,12 @@ func (c *Conn) Send(buf []byte) (int, error) {
 		return 0, nil
 	}
 	buffer := getBufferFromPool(len(buf))
-	n, err := buffer.Write(buf)
+	_, err := buffer.Write(buf)
 	if err != nil {
+		putBufferToPool(buffer)
 		return 0, err
 	}
-	select {
-	case c.sendBufList <- buffer:
-		return n, nil
-	default:
-		atomic.AddUint32(&c.dropped, 1)
-		return 0, errSendListFull
-	}
+	return c.sendByteBuffer(buffer)
 }
 
 // SendPacket use for send packet, can be call in any goroutines.
@@ -357,12 +363,19 @@ func (c *Conn) SendPacket(p Packet) (int, error) {
 	if atomic.LoadInt32(&c.state) != connStateNormal {
 		return 0, errSendToClosedConn
 	}
-	buf, err := c.Opts.Protocol.Pack(p)
-	if err != nil {
-		return 0, err
+
+	needSize := c.Opts.Protocol.PackSize(p)
+	if needSize <= 0 {
+		return 0, nil
 	}
 
-	return c.Send(buf)
+	buffer := getBufferFromPool(needSize)
+	_, err := c.Opts.Protocol.PackTo(p, buffer)
+	if err != nil {
+		putBufferToPool(buffer)
+		return 0, err
+	}
+	return c.sendByteBuffer(buffer)
 }
 
 // DialAndServe connects to the addr and serve.
