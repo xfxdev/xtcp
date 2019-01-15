@@ -89,24 +89,29 @@ func chatProcess(c *xtcp.Conn, msg proto.Message) {
 type myHandler struct {
 }
 
-func (h *myHandler) OnEvent(et xtcp.EventType, c *xtcp.Conn, p xtcp.Packet) {
-	switch et {
-	case xtcp.EventAccept:
-		xlog.Info("accept : ", c)
-		c.UserData = "server"
-	case xtcp.EventConnected:
-		xlog.Info("connected : ", c)
-		c.UserData = "client"
-	case xtcp.EventRecv:
-		if protobufPacket, ok := p.(*ProtobufPacket); ok {
-			proc := mapProcessor[proto.MessageName(protobufPacket.Msg)]
-			if proc != nil {
-				proc(c, protobufPacket.Msg)
-			} else {
-				xlog.Error("no processor for Packet : ", p)
-			}
+func (h *myHandler) OnAccept(c *xtcp.Conn) {
+	xlog.Info("accept : ", c)
+	c.UserData = "server"
+}
+func (h *myHandler) OnConnect(c *xtcp.Conn) {
+	xlog.Info("connected : ", c)
+	c.UserData = "client"
+}
+func (h *myHandler) OnRecv(c *xtcp.Conn, p xtcp.Packet) {
+	if protobufPacket, ok := p.(*ProtobufPacket); ok {
+		proc := mapProcessor[proto.MessageName(protobufPacket.Msg)]
+		if proc != nil {
+			proc(c, protobufPacket.Msg)
+		} else {
+			xlog.Error("no processor for Packet : ", p)
 		}
 	}
+}
+func (h *myHandler) OnUnpackErr(c *xtcp.Conn, buf []byte, err error) {
+
+}
+func (h *myHandler) OnClose(c *xtcp.Conn) {
+	xlog.Debugf("close : %v", c.RawConn.RemoteAddr())
 }
 
 func main() {
