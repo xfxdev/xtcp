@@ -11,6 +11,8 @@ var (
 	DefaultRecvBufSize = 4 << 10 // 4k
 	// DefaultSendBufListLen is the default length of send buf list.
 	DefaultSendBufListLen = 1 << 10 // 1k
+	// DefaultAsyncWrite is enable async write or not.
+	DefaultAsyncWrite = true
 )
 
 // StopMode define the stop mode of server and conn.
@@ -25,40 +27,19 @@ const (
 	StopGracefullyAndWait
 )
 
-// EventType is the conn event type.
-type EventType int
-
-func (et EventType) String() string {
-	switch et {
-	case EventAccept:
-		return "accept"
-	case EventConnected:
-		return "connected"
-	case EventRecv:
-		return "recv"
-	case EventClosed:
-		return "closed"
-	default:
-		return "<unknown xtcp event>"
-	}
-}
-
-const (
-	// EventAccept mean server accept a new connect.
-	EventAccept EventType = iota
-	// EventConnected mean client connected to a server.
-	EventConnected
-	// EventRecv mean conn recv a packet.
-	EventRecv
-	// EventClosed mean conn is closed.
-	EventClosed
-)
-
 // Handler is the event callback.
-// p will be nil when event is EventAccept/EventConnected/EventClosed
 // Note : don't block in event handler.
 type Handler interface {
-	OnEvent(et EventType, c *Conn, p Packet)
+	// OnAccept mean server accept a new connect.
+	OnAccept(*Conn)
+	// OnConnect mean client connected to a server.
+	OnConnect(*Conn)
+	// OnRecv mean conn recv a packet.
+	OnRecv(*Conn, Packet)
+	// OnUnpackErr mean failed to unpack recved data.
+	OnUnpackErr(*Conn, []byte, error)
+	// OnClose mean conn is closed.
+	OnClose(*Conn)
 }
 
 // Packet is the unit of data.
@@ -90,6 +71,7 @@ type Options struct {
 	Protocol        Protocol
 	RecvBufSize     int           // default is DefaultRecvBufSize if you don't set.
 	SendBufListLen  int           // default is DefaultSendBufListLen if you don't set.
+	AsyncWrite      bool          // default is DefaultAsyncWrite  if you don't set.
 	NoDelay         bool          // default is true
 	KeepAlive       bool          // default is false
 	KeepAlivePeriod time.Duration // default is 0, mean use system setting.
@@ -109,6 +91,7 @@ func NewOpts(h Handler, p Protocol) *Options {
 		Protocol:       p,
 		RecvBufSize:    DefaultRecvBufSize,
 		SendBufListLen: DefaultSendBufListLen,
+		AsyncWrite:     DefaultAsyncWrite,
 		NoDelay:        true,
 		KeepAlive:      false,
 	}

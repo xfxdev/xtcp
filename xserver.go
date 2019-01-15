@@ -150,7 +150,7 @@ func (s *Server) handleRawConn(conn net.Conn) {
 		s.wg.Done()
 	}()
 
-	s.Opts.Handler.OnEvent(EventAccept, tcpConn, nil)
+	s.Opts.Handler.OnAccept(tcpConn)
 
 	tcpConn.serve()
 }

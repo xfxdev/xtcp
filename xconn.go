@@ -16,80 +16,70 @@ const (
 	connStateNormal int32 = iota
 	connStateStopping
 	connStateStopped
-
-	smallBufferSize = 64
 )
 
 var (
 	errSendToClosedConn = errors.New("send to closed conn")
-	errSendListFull     = errors.New("send buffer list full")
+	errSendListFull     = errors.New("send list full")
 
-	bufferPoolSmall = &sync.Pool{
-		New: func() interface{} {
-			return bytes.NewBuffer(nil)
-		},
-	}
 	bufferPool1K = &sync.Pool{
 		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 1<<10))
+			return make([]byte, 1<<10)
 		},
 	}
 	bufferPool2K = &sync.Pool{
 		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 2<<10))
+			return make([]byte, 2<<10)
 		},
 	}
 	bufferPool4K = &sync.Pool{
 		New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 4<<10))
+			return make([]byte, 4<<10)
 		},
 	}
 	bufferPoolBig = &sync.Pool{}
 )
 
-func getBufferFromPool(targetSize int) *bytes.Buffer {
-	var buf *bytes.Buffer
-	if targetSize <= smallBufferSize {
-		buf = bufferPoolSmall.Get().(*bytes.Buffer)
-	} else if targetSize <= 1<<10 {
-		buf = bufferPool1K.Get().(*bytes.Buffer)
+func getBufferFromPool(targetSize int) []byte {
+	var buf []byte
+	if targetSize <= 1<<10 {
+		buf = bufferPool1K.Get().([]byte)
 	} else if targetSize <= 2<<10 {
-		buf = bufferPool2K.Get().(*bytes.Buffer)
+		buf = bufferPool2K.Get().([]byte)
 	} else if targetSize <= 4<<10 {
-		buf = bufferPool4K.Get().(*bytes.Buffer)
+		buf = bufferPool4K.Get().([]byte)
 	} else {
 		itr := bufferPoolBig.Get()
 		if itr != nil {
-			buf = itr.(*bytes.Buffer)
+			buf = itr.([]byte)
 		} else {
-			buf = bytes.NewBuffer(make([]byte, 0, targetSize))
+			buf = make([]byte, targetSize)
 		}
 	}
-	buf.Reset()
+	buf = buf[:targetSize]
 	return buf
 }
 
-func putBufferToPool(buffer *bytes.Buffer) {
-	cap := buffer.Cap()
-	if cap <= smallBufferSize {
-		bufferPoolSmall.Put(buffer)
-	} else if cap <= 1<<10 {
-		bufferPool1K.Put(buffer)
+func putBufferToPool(buf []byte) {
+	cap := cap(buf)
+	if cap <= 1<<10 {
+		bufferPool1K.Put(buf)
 	} else if cap <= 2<<10 {
-		bufferPool2K.Put(buffer)
+		bufferPool2K.Put(buf)
 	} else if cap <= 4<<10 {
-		bufferPool4K.Put(buffer)
+		bufferPool4K.Put(buf)
 	} else {
-		bufferPoolBig.Put(buffer)
+		bufferPoolBig.Put(buf)
 	}
 }
 
 // A Conn represents the server side of an tcp connection.
 type Conn struct {
+	sync.Mutex
 	Opts        *Options
 	RawConn     net.Conn
 	UserData    interface{}
-	sendBufList chan *bytes.Buffer
+	sendBufList chan []byte
 	closed      chan struct{}
 	state       int32
 	wg          sync.WaitGroup
@@ -112,7 +102,7 @@ func NewConn(opts *Options) *Conn {
 	}
 	c := &Conn{
 		Opts:        opts,
-		sendBufList: make(chan *bytes.Buffer, opts.SendBufListLen),
+		sendBufList: make(chan []byte, opts.SendBufListLen),
 		closed:      make(chan struct{}),
 		state:       connStateNormal,
 	}
@@ -145,12 +135,12 @@ func (c *Conn) Stop(mode StopMode) {
 		if mode == StopImmediately {
 			atomic.StoreInt32(&c.state, connStateStopped)
 			c.RawConn.Close()
-			close(c.sendBufList)
+			//close(c.sendBufList) // leave channel open, because other goroutine maybe use it in Send.
 			close(c.closed)
 		} else {
 			atomic.StoreInt32(&c.state, connStateStopping)
 			// c.RawConn.Close() 	// will close in sendLoop
-			// close(c.sendBufList) // will close in sendLoop
+			// close(c.sendBufList)
 			close(c.closed)
 			if mode == StopGracefullyAndWait {
 				c.wg.Wait()
@@ -172,23 +162,25 @@ func (c *Conn) serve() {
 		tcpConn.SetKeepAlivePeriod(c.Opts.KeepAlivePeriod)
 	}
 
-	c.wg.Add(2)
-	go c.sendLoop()
+	if c.Opts.AsyncWrite {
+		c.wg.Add(2)
+		go c.sendLoop()
+	} else {
+		c.wg.Add(1)
+	}
 	c.recvLoop()
 
-	c.Opts.Handler.OnEvent(EventClosed, c, nil)
+	c.Opts.Handler.OnClose(c)
 }
 
 func (c *Conn) recvLoop() {
 	var tempDelay time.Duration
 	tempBuf := make([]byte, c.Opts.RecvBufSize)
-	recvBuf := getBufferFromPool(c.Opts.RecvBufSize)
+	recvBuf := bytes.NewBuffer(make([]byte, 0, c.Opts.RecvBufSize))
 	maxDelay := 1 * time.Second
 
 	defer func() {
 		log.Debug("XTCP - Conn recv loop exit : ", c.RawConn.RemoteAddr())
-
-		putBufferToPool(recvBuf)
 		c.wg.Done()
 	}()
 
@@ -219,7 +211,7 @@ func (c *Conn) recvLoop() {
 
 			if !c.IsStoped() {
 				if err != io.EOF {
-					log.Errorf("XTCP - Conn[%v] recv error : ", c.RawConn.RemoteAddr(), err)
+					log.Errorf("XTCP - Conn[%v] recv error : %v", c.RawConn.RemoteAddr(), err)
 				}
 				c.Stop(StopImmediately)
 			}
@@ -234,11 +226,7 @@ func (c *Conn) recvLoop() {
 		for recvBuf.Len() > 0 {
 			p, pl, err := c.Opts.Protocol.Unpack(recvBuf.Bytes())
 			if err != nil {
-				buf := recvBuf.Bytes()
-				if len(buf) > 128 {
-					buf = buf[:128]
-				}
-				log.Errorf("XTCP - Conn[%v] protocol unpack error: %v, BufLen : %v, Buf : %v", c.RawConn.RemoteAddr(), err, len(recvBuf.Bytes()), buf)
+				c.Opts.Handler.OnUnpackErr(c, recvBuf.Bytes(), err)
 			}
 
 			if pl > 0 {
@@ -246,7 +234,7 @@ func (c *Conn) recvLoop() {
 			}
 
 			if p != nil {
-				c.Opts.Handler.OnEvent(EventRecv, c, p)
+				c.Opts.Handler.OnRecv(c, p)
 			} else {
 				break
 			}
@@ -254,7 +242,7 @@ func (c *Conn) recvLoop() {
 	}
 }
 
-func (c *Conn) sendBuf(buf []byte) error {
+func (c *Conn) sendBuf(buf []byte) (int, error) {
 	sended := 0
 	var tempDelay time.Duration
 	maxDelay := 1 * time.Second
@@ -263,8 +251,10 @@ func (c *Conn) sendBuf(buf []byte) error {
 			c.RawConn.SetWriteDeadline(time.Now().Add(c.Opts.WriteDeadline))
 		}
 		wn, err := c.RawConn.Write(buf[sended:])
-		sended += wn
-		atomic.AddUint64(&c.sendBytes, uint64(wn))
+		if wn > 0 {
+			sended += wn
+			atomic.AddUint64(&c.sendBytes, uint64(wn))
+		}
 
 		if err != nil {
 			if nerr, ok := err.(net.Error); ok {
@@ -289,11 +279,11 @@ func (c *Conn) sendBuf(buf []byte) error {
 				log.Errorf("XTCP - Conn[%v] Send error : %v", c.RawConn.RemoteAddr(), err)
 				c.Stop(StopImmediately)
 			}
-			return err
+			return sended, err
 		}
 		tempDelay = 0
 	}
-	return nil
+	return sended, nil
 }
 
 func (c *Conn) sendLoop() {
@@ -307,20 +297,19 @@ func (c *Conn) sendLoop() {
 		}
 
 		select {
-		case buffer, ok := <-c.sendBufList:
+		case buf, ok := <-c.sendBufList:
 			if !ok {
 				return
 			}
-			err := c.sendBuf(buffer.Bytes())
+			_, err := c.sendBuf(buf)
 			if err != nil {
 				return
 			}
-			putBufferToPool(buffer)
+			putBufferToPool(buf)
 		case <-c.closed:
 			if atomic.LoadInt32(&c.state) == connStateStopping {
 				if len(c.sendBufList) == 0 {
 					atomic.SwapInt32(&c.state, connStateStopped)
-					close(c.sendBufList)
 					c.RawConn.Close()
 					return
 				}
@@ -338,17 +327,22 @@ func (c *Conn) Send(buf []byte) (int, error) {
 	if bufLen <= 0 {
 		return 0, nil
 	}
-	buffer := getBufferFromPool(len(buf))
-	n, err := buffer.Write(buf)
-	if err != nil {
-		return 0, err
-	}
-	select {
-	case c.sendBufList <- buffer:
-		return n, nil
-	default:
-		atomic.AddUint32(&c.dropped, 1)
-		return 0, errSendListFull
+
+	if c.Opts.AsyncWrite {
+		buffer := getBufferFromPool(len(buf))
+		copy(buffer, buf)
+		select {
+		case c.sendBufList <- buffer:
+			return bufLen, nil
+		default:
+			atomic.AddUint32(&c.dropped, 1)
+			return 0, errSendListFull
+		}
+	} else {
+		c.Lock() // Ensure entirety of buf is written together
+		n, err := c.sendBuf(buf)
+		c.Unlock()
+		return n, err
 	}
 }
 
@@ -374,7 +368,7 @@ func (c *Conn) DialAndServe(addr string) error {
 
 	c.RawConn = rawConn
 
-	c.Opts.Handler.OnEvent(EventConnected, c, nil)
+	c.Opts.Handler.OnConnect(c)
 
 	c.serve()
 
