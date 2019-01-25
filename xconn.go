@@ -37,7 +37,6 @@ var (
 			return make([]byte, 4<<10)
 		},
 	}
-	bufferPoolBig = &sync.Pool{}
 )
 
 func getBufferFromPool(targetSize int) []byte {
@@ -53,19 +52,6 @@ func getBufferFromPool(targetSize int) []byte {
 	}
 	buf = buf[:targetSize]
 	return buf
-}
-
-func putBufferToPool(buf []byte) {
-	cap := cap(buf)
-	if cap <= 1<<10 {
-		bufferPool1K.Put(buf)
-	} else if cap <= 2<<10 {
-		bufferPool2K.Put(buf)
-	} else if cap <= 4<<10 {
-		bufferPool4K.Put(buf)
-	} else {
-		bufferPoolBig.Put(buf)
-	}
 }
 
 // A Conn represents the server side of an tcp connection.
@@ -300,7 +286,6 @@ func (c *Conn) sendLoop() {
 			if err != nil {
 				return
 			}
-			putBufferToPool(buf)
 		case <-c.closed:
 			if atomic.LoadInt32(&c.state) == connStateStopping {
 				if len(c.sendBufList) == 0 {
