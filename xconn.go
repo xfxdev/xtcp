@@ -49,12 +49,7 @@ func getBufferFromPool(targetSize int) []byte {
 	} else if targetSize <= 4<<10 {
 		buf = bufferPool4K.Get().([]byte)
 	} else {
-		itr := bufferPoolBig.Get()
-		if itr != nil {
-			buf = itr.([]byte)
-		} else {
-			buf = make([]byte, targetSize)
-		}
+		buf = make([]byte, targetSize)
 	}
 	buf = buf[:targetSize]
 	return buf
