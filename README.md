@@ -9,16 +9,17 @@ A TCP Server Framework with graceful shutdown,custom protocol.
 
 ## Install
 
-~~~
-go get github.com/xfxdev/xlog // xtcp use xlog inner.
+```sh
+go get github.com/xfxdev/xlog # xtcp use xlog inner.
 go get github.com/xfxdev/xtcp
-~~~
+```
 
 ## Usage
 
 ### define your protocol format:
 Before create server and client, you need define the protocol format first.
-~~~
+
+```go
 // Packet is the unit of data.
 type Packet interface {
 	fmt.Stringer
@@ -41,11 +42,12 @@ type Protocol interface {
 	// (p, len, nil) : unpack succeed.
 	Unpack(buf []byte) (Packet, int, error)
 }
-~~~
+```
 
 ### provide event handler:
 In xtcp, there are some events to notify the state of net conn, you can handle them according your need:
-~~~
+
+```go
 const (
 	// EventAccept mean server accept a new connect.
 	EventAccept EventType = iota
@@ -56,18 +58,21 @@ const (
 	// EventClosed mean conn is closed.
 	EventClosed
 )
-~~~
+```
+
 To handle the event, just implement the OnEvent interface.
-~~~
+
+```go
 // Handler is the event callback.
 // p will be nil when event is EventAccept/EventConnected/EventClosed
 type Handler interface {
 	OnEvent(et EventType, c *Conn, p Packet)
 }
-~~~
+```
 
 ### create server:
-~~~
+
+```go
 // 1. create protocol and handler.
 // ...
 
@@ -79,10 +84,11 @@ server := xtcp.NewServer(opts)
 
 // 4. start.
 go server.ListenAndServe("addr")
-~~~
+```
 
 ### create client:
-~~~
+
+```go
 // 1. create protocol and handler.
 // ...
 
@@ -94,27 +100,31 @@ client := NewConn(opts)
 
 // 4. start
 go client.DialAndServe("addr")
-~~~
+```
 
 ### send and recv packet.
 To send data, just call the 'Send' function of Conn. You can safe call it in any goroutines.
-~~~
+
+```go
 func (c *Conn) Send(buf []byte) error
-~~~
+```
 
 To recv a packet, implement your handler function:
-~~~
+
+```go
 func (h *myhandler) OnEvent(et EventType, c *Conn, p Packet) {
 	switch et {
 		case EventRecv:
 			...
 	}
 }
-~~~
+```
 
 ### stop
+
 xtcp have three stop modes, stop gracefully mean conn will stop until all cached data sended.
-~~~
+
+```go
 // StopMode define the stop mode of server and conn.
 type StopMode uint8
 
@@ -126,7 +136,7 @@ const (
 	// StopGracefullyAndWait stop and block until cached data sended.
 	StopGracefullyAndWait
 )
-~~~
+```
 
 ## Example
 The example define a protocol format which use protobuf inner.
