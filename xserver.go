@@ -4,8 +4,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	log "github.com/xfxdev/xlog"
 )
 
 // Server used for running a tcp server.
@@ -42,7 +40,7 @@ func (s *Server) Serve(l net.Listener) {
 	s.lis = l
 	s.mu.Unlock()
 
-	log.Info("XTCP - Server listen on: ", l.Addr().String())
+	logger.Log(Info, "XTCP - Server listen on: ", l.Addr().String())
 
 	var tempDelay time.Duration // how long to sleep on accept failure
 	maxDelay := 1 * time.Second
@@ -59,7 +57,7 @@ func (s *Server) Serve(l net.Listener) {
 				if tempDelay > maxDelay {
 					tempDelay = maxDelay
 				}
-				log.Errorf("XTCP - Server Accept error: %v; retrying in %v", err, tempDelay)
+				logger.Logf(Error, "XTCP - Server Accept error: %v; retrying in %v", err, tempDelay)
 				select {
 				case <-time.After(tempDelay):
 					continue
@@ -69,7 +67,7 @@ func (s *Server) Serve(l net.Listener) {
 			}
 
 			if !s.IsStopped() {
-				log.Errorf("XTCP - Server Accept error: %v; server closed!", err)
+				logger.Logf(Error, "XTCP - Server Accept error: %v; server closed!", err)
 				s.Stop(StopImmediately)
 			}
 
@@ -123,7 +121,7 @@ func (s *Server) Stop(mode StopMode) {
 			s.wg.Wait()
 		}
 
-		log.Info("XTCP - Server stopped.")
+		logger.Log(Info, "XTCP - Server stopped.")
 	})
 }
 
@@ -185,11 +183,11 @@ func (s *Server) CurClientCount() int {
 // The opts will set to all accept conns.
 func NewServer(opts *Options) *Server {
 	if opts.RecvBufSize <= 0 {
-		log.Warnf("Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
+		logger.Logf(Warn, "Invalid Opts.RecvBufSize : %v, use DefaultRecvBufSize instead", opts.RecvBufSize)
 		opts.RecvBufSize = DefaultRecvBufSize
 	}
 	if opts.SendBufListLen <= 0 {
-		log.Warnf("Invalid Opts.SendBufListLen : %v, use DefaultSendBufListLen instead", opts.SendBufListLen)
+		logger.Logf(Warn, "Invalid Opts.SendBufListLen : %v, use DefaultSendBufListLen instead", opts.SendBufListLen)
 		opts.SendBufListLen = DefaultSendBufListLen
 	}
 	s := &Server{

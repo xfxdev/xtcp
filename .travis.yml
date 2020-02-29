@@ -4,4 +4,4 @@ go:
  - tip
 
 script:
- - cd ./example && go build && ./example
+ - cd ./_example && go build && ./_example

@@ -27,6 +27,32 @@ const (
 	StopGracefullyAndWait
 )
 
+// LogLevel used to filter log message by the Logger.
+type LogLevel uint8
+
+// logging levels.
+const (
+	Panic LogLevel = iota
+	Fatal
+	Error
+	Warn
+	Info
+	Debug
+)
+// Logger is the log interface
+type Logger interface {
+	Log(l LogLevel, v ...interface{})
+	Logf(l LogLevel, format string, v ...interface{})
+}
+type emptyLogger struct {}
+func (*emptyLogger)Log(l LogLevel, v ...interface{}) {}
+func (*emptyLogger)Logf(l LogLevel, format string, v ...interface{}) {}
+var logger Logger = &emptyLogger{}
+// SetLogger set the logger
+func SetLogger(l Logger) {
+	logger = l
+}
+
 // Handler is the event callback.
 // Note : don't block in event handler.
 type Handler interface {

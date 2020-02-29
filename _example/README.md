@@ -6,12 +6,6 @@ In this example you can see:
 
 	* how to define the protocol format.
 	* how to create server and client.
+	* how to custom the logger.
 	* how to handle event.
 	* how to stop the server and client.
-
-## Install
-~~~
-go get github.com/golang/protobuf/proto
-go get github.com/xfxdev/xlog	// xtcp use xlog inner.
-go get github.com/xfxdev/xtcp
-~~~

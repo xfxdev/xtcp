@@ -7,16 +7,9 @@ A TCP Server Framework with graceful shutdown,custom protocol.
 [![GoDoc](https://godoc.org/github.com/xfxdev/xtcp?status.svg)](https://godoc.org/github.com/xfxdev/xtcp)
 
 
-## Install
-
-```sh
-go get github.com/xfxdev/xlog # xtcp use xlog inner.
-go get github.com/xfxdev/xtcp
-```
-
 ## Usage
 
-### define your protocol format:
+### Define your protocol format:
 Before create server and client, you need define the protocol format first.
 
 ```go
@@ -44,7 +37,14 @@ type Protocol interface {
 }
 ```
 
-### provide event handler:
+### Set your logger(optional):
+```go
+func SetLogger(l Logger)
+```
+Note: xtcp will not output any log by default unless you implement your own logger.
+
+
+### Provide event handler:
 In xtcp, there are some events to notify the state of net conn, you can handle them according your need:
 
 ```go
@@ -70,7 +70,7 @@ type Handler interface {
 }
 ```
 
-### create server:
+### Create server:
 
 ```go
 // 1. create protocol and handler.
@@ -86,7 +86,7 @@ server := xtcp.NewServer(opts)
 go server.ListenAndServe("addr")
 ```
 
-### create client:
+### Create client:
 
 ```go
 // 1. create protocol and handler.
@@ -102,7 +102,7 @@ client := NewConn(opts)
 go client.DialAndServe("addr")
 ```
 
-### send and recv packet.
+### Send and recv packet.
 To send data, just call the 'Send' function of Conn. You can safe call it in any goroutines.
 
 ```go
@@ -120,7 +120,7 @@ func (h *myhandler) OnEvent(et EventType, c *Conn, p Packet) {
 }
 ```
 
-### stop
+### Stop
 
 xtcp have three stop modes, stop gracefully mean conn will stop until all cached data sended.
 
@@ -142,4 +142,4 @@ const (
 The example define a protocol format which use protobuf inner.
 You can see how to define the protocol and how to create server and client.
 
-[example](https://github.com/xfxdev/xtcp/tree/master/example)
+[example](https://github.com/xfxdev/xtcp/tree/master/_example)
