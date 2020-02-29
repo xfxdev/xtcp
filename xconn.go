@@ -50,6 +50,10 @@ func getBufferFromPool(targetSize int) []byte {
 		itr := bufferPoolBig.Get()
 		if itr != nil {
 			buf = itr.([]byte)
+			if cap(buf) < targetSize {
+				bufferPoolBig.Put(itr)
+				buf = make([]byte, targetSize)
+			}
 		} else {
 			buf = make([]byte, targetSize)
 		}
